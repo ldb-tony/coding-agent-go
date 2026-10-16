@@ -4,3 +4,6 @@
 # 运行时日志产物
 agent.json
 input.json
+
+# 编译产物
+coding-agent-go

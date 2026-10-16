@@ -1,0 +1,26 @@
+# Checklist
+
+- [x] Go module 已初始化并可编译(`go build` 通过)
+- [x] `.env.example` 已提供且字段齐全
+- [x] bash 工具危险命令拦截生效(`sudo` / `rm -rf /` 等被拦截)
+- [x] bash 工具超时 120s 生效(默认 120s;测试以 1s 内部函数验证超时路径)
+- [x] bash 工具空输出返回 `(no output)`
+- [x] bash 工具输出截断 50000 字符生效(按 rune 截断)
+- [x] bash 工具 stderr/stdout 合并输出正确
+- [x] LLM 配置加载正确(`.env` 覆盖、BASE_URL 逻辑、必填校验)
+- [x] System prompt 包含当前目录、环境说明及 "Act, don't explain."
+- [x] LLM 调用接口已抽象(mock 可替换)
+- [x] Agent Loop:无 `tool_use` 时退出且保留 assistant 消息
+- [x] Agent Loop:有 `tool_use` 时执行全部调用并回喂 `tool_result`
+- [x] Agent Loop:多个并行 `tool_use` 全部执行
+- [x] Agent Loop:不凭空追加空 tool_result 消息
+- [x] `input.json` 每轮记录完整 messages(含 `ts`、`turn`、`input`)(e2e 验证)
+- [x] `agent.json` 每轮记录完整响应(含 `ts`、`turn`、`response`)(e2e 验证)
+- [x] 启动时 `agent.json` 与 `input.json` 被重置为空数组
+- [x] REPL:用户输入 `q` / `exit` / 空行可退出(e2e 用 `q` 验证)
+- [x] REPL:EOF / Ctrl-C 可安全退出(Scanner EOF 退出;SIGINT 信号处理)
+- [x] REPL:history 跨轮保留
+- [x] REPL:执行命令时打印命令及输出前 200 字符(e2e 验证,输出按 200 rune 截断展示)
+- [x] REPL:每轮结束后打印模型最终 text 块(e2e 验证)
+- [x] `go test ./...` 全部通过
+- [x] 手动端到端至少跑通一个真实 API 调用回合(/tmp 下用示例 prompt 验证:模型调用 `ls -la` → 结果回喂 → 输出最终回答)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,8 +78,10 @@ type readState struct {
 
 // sessionState 是会话级状态，挂在 agentLoop 上而不是全局变量。
 type sessionState struct {
-	reads map[string]readState // absPath -> 最近一次成功读取
-	todo  *todoManager         // s05: 会话级待办列表
+	reads  map[string]readState // absPath -> 最近一次成功读取
+	todo   *todoManager         // s05: 会话级待办列表
+	client LLMClient            // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
+	ctx    context.Context      // s06: 子代理继承父 loop 的 context（超时/取消）
 }
 
 func newSessionState() *sessionState {
@@ -110,13 +113,20 @@ type toolHandler func(st *sessionState, args json.RawMessage) string
 
 // TOOL_HANDLERS：工具名 → 处理函数。加一个工具 = 这里加一行映射。
 var toolHandlers = map[string]toolHandler{
-	"bash":        bashHandler,
-	"read_file":   readHandler,
-	"write_file":  writeHandler,
-	"edit_file":   editHandler,
-	"glob":        globHandler,
-	"grep":        grepHandler,
-	"todo_write":  todoWriteHandler, // s05: 待办规划
+	"bash":       bashHandler,
+	"read_file":  readHandler,
+	"write_file": writeHandler,
+	"edit_file":  editHandler,
+	"glob":       globHandler,
+	"grep":       grepHandler,
+	"todo_write": todoWriteHandler, // s05: 待办规划
+}
+
+// task 的处理器在 init 里注册：taskHandler 经 runSubagent 复用 runTool，而 runTool
+// 读取 toolHandlers —— 若在 map 字面量里直接引用 taskHandler，会构成包级初始化循环
+// （initialization cycle）。init 阶段赋值可打破该循环。
+func init() {
+	toolHandlers["task"] = taskHandler
 }
 
 func runTool(st *sessionState, name string, input json.RawMessage) string {
@@ -650,5 +660,8 @@ func allTools() []anthropic.ToolUnionParam {
 				},
 			},
 			[]string{"todos"}),
+		tool("task", "Run a subagent with fresh conversation context and return its final text.",
+			map[string]any{"prompt": map[string]string{"type": "string"}},
+			[]string{"prompt"}),
 	}
 }

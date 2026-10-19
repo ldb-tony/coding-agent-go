@@ -1,6 +1,6 @@
 # 我们的工具 vs Claude Code 工具：逐工具深度对比
 
-本系列报告将当前 Go coding agent（s02）的 6 个工具，逐个与 Claude Code 的对应内置工具做源码级对比。每份报告独立成文，固定 10 节结构（设计哲学 → 描述 → schema → 执行机制 → 输出契约 → 安全 → 量化推演 → 差距评级 → 对齐草案 → 参考资料）。
+本系列报告将当前 Go coding agent（s02-s05）的 7 个工具及 s 系列教学实现的能力机制（s07 skill loading 等），逐个与 Claude Code 的对应内置能力做源码级对比。每份报告独立成文，固定 10 节结构（设计哲学/背景 → 描述/官方原文 → schema → 执行机制 → 输出契约 → 安全/reminder → 量化推演 → 差距评级 → 对齐草案 → 参考资料）。
 
 > 替代说明：本系列是 [.trae/documents/tools_gap_analysis_plan.md](file:///Users/tony/coding-agent-go/.trae/documents/tools_gap_analysis_plan.md) 所附总览分析的正式深化版；总览中的结论已拆入各工具报告与本文。本系列仅做分析与设计，不含代码实施。
 
@@ -14,6 +14,8 @@
 | 4 | `grep` | `Grep` | 我们重写了一个忽略 gitignore、只有一种输出的玩具 rg；CC 直接暴露 ripgrep 的 13 个旋钮和三态输出 | [04](04-grep-vs-Grep.md) |
 | 5 | `glob` | `Glob` | 我们的 `**` 匹配质量尚可，但缺 path、忽略规则、结构化输出与并发安全声明 | [05](05-glob-vs-Glob.md) |
 | 6 | `bash` | `Bash` | s03 三闸门权限管线（deny 清单→破坏性规则→用户确认）已落地，但 shell 本身仍是硬截断、无状态、退出码无语义；CC 是分类器/权限/沙箱/语义退出码/落盘溢出/持久 cwd 的系统工程 | [06](06-bash-vs-Bash.md) |
+| 7 | `todo_write`（s05） | **Task 系统**（`TaskCreate`/`TaskList`/`TaskGet`/`TaskUpdate`）+ Legacy `TodoWrite` | 我们是单工具全量 replace + 3 轮 reminder；CC 已进化到服务端 taskId + 增量 Update + 文件持久化 + SDK 结构化 stats，v2.1.268 起默认替换 TodoWrite（v2.1.233+ 新模型连 Task 工具都不默认提供——原生多步跟踪） | [07](07-todo_write-vs-TaskSystem.md) |
+| 9 | `load_skill`（s07 skill loading） | `Skill` / Skills 系统 | 我们实现了三级披露的前两级（目录+全文）；CC 把 skill 做成开放标准与分发生态：字段约束、7 类位置、双通道调用、权限规则、references 按需 | [09](09-load_skill-vs-Skill.md) |
 
 ## 方法论与资料版本
 
@@ -35,7 +37,9 @@
 | Shell 能力 | cwd 持久、timeout 可调、后台任务、输出落盘 | 每条命令独立 sh、固定 120s、超限丢弃 | bash |
 | 安全模型 | 命令分类 + 权限模式 + 路径规则 + 可选沙箱 + 语义化警告，分层评估 | s03 三闸门（7 项 deny 子串 + rm 类破坏性规则 + y/N 确认），无命令分类、无注入检查、无沙箱 | bash（文件工具只有 safePath） |
 | 工具间联动 | 权限规则一处配置联动 rg 排除、Read/Edit 隐含授权与连带禁止 | 工具彼此孤立 | 全部 |
-| harness 状态 | 有会话状态（readFileState、shell 会话、任务注册表） | 全是无状态纯函数 | 全部 |
+| harness 状态 | 有会话状态（readFileState、shell 会话、任务注册表） | 有 s05 `sessionState.todo`；但全是无状态纯函数的方向仍是主流 | 全部（planning 是 s05 新增） |
+| planning 可观测性 | Task 系统：服务端 taskId + 增量 Update + 文件持久化 + SDK 结构化 stats（TaskTracker 实时渲染） | s05 单工具全量 replace + 无 taskId + 无 activeForm + 无查询能力 + 自由文本输出 | **todo_write**（详见 [07](07-todo_write-vs-TaskSystem.md)） |
+| 知识与能力加载 | Agent Skills 开放标准 + 三级渐进披露（~100 tok 目录 / <5K tok 正文 / references 按需）+ 7 类加载位置 + 模型/用户双通道调用控制 + `Skill(name *)` 权限规则 + 动态注入 | s07 两级加载（catalog 进 system prompt + `load_skill` 全文进 tool_result）：无字段约束、无 supporting files、无调用控制、无权限语义、无热更新 | **load_skill**（详见 [09](09-load_skill-vs-Skill.md)） |
 
 ## 三条共性结论：Claude Code 的工具为什么更好
 
@@ -56,7 +60,7 @@ CC 的 bash 安全是命令分类器（管道全段判定）→ 权限模式/规
 - **里程碑 A · 工具内功（纯 Go、零外部依赖）**：① 描述/schema 契约化 → ② harness 会话状态（readFileState、shell cwd）→ ③ Read 对齐（行号/offset/双层预算/stub）→ ④ Write/Edit 对齐（唯一性、replace_all、multi_edit、门控、原子写）
 - **里程碑 B · 搜索与 shell**：⑤ Grep/Glob 对齐 ripgrep 语义（运行时探测 rg，缺失则回退自研+gitignore 解析）→ ⑥ Bash 增强（cwd 持久、timeout、溢出落盘、命令分类、退出码语义）
 - **里程碑 C · 安全与长任务**：⑦ 权限系统 —— **初版已落地**（三闸门，见 [permission.go](file:///Users/tony/coding-agent-go/permission.go)）；后续：命令分类器 + 只读自动放行、规则格式 `Bash(pat)`/`Read(glob)`/`Edit(glob)`、注入检查 → ⑧ 后台任务（run_in_background / TaskStop / 完成通知）
-- **远期**：TodoWrite、Task 子代理、WebFetch/WebSearch、LSP 诊断联动、MCP
+- **远期**：~~TodoWrite~~（已落地 s05，详见 [07](07-todo_write-vs-TaskSystem.md) 对齐草案）→ **Task 四工具 + 服务端 taskId** → Task 子代理、WebFetch/WebSearch、LSP 诊断联动、MCP
 
 ## 参考资料（总）
 

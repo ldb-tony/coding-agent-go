@@ -10,6 +10,8 @@ import (
 func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.MessageParam) ([]anthropic.MessageParam, error) {
 	// 会话级状态：read_file 的 mtime 去重（及后续 read-before-write 门控）挂在这里。
 	st := newSessionState()
+	st.client = client // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
+	st.ctx = ctx       // s06: 子代理继承父 loop 的 context（超时/取消）
 	// s05: 连续未使用 todo_write 的轮次数；>=3 时注入 reminder。
 	roundsSinceTodo := 0
 	for turn := 0; ; turn++ {

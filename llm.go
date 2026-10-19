@@ -69,5 +69,9 @@ func systemPrompt() string {
 		env = "Unix-like: the bash tool runs the system shell"
 	}
 
-	return fmt.Sprintf("You are a coding agent at %s. Environment: %s. Use the provided tools to solve tasks. Act, don't explain.", cwd, env)
+	return fmt.Sprintf(
+		"You are a coding agent at %s. Environment: %s.\n"+
+			"For complex multi-step tasks, use todo_write first to plan the steps before executing.\n"+
+			"Use the provided tools to solve tasks. Act, don't explain.",
+		cwd, env)
 }

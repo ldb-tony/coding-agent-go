@@ -78,10 +78,14 @@ type readState struct {
 // sessionState 是会话级状态，挂在 agentLoop 上而不是全局变量。
 type sessionState struct {
 	reads map[string]readState // absPath -> 最近一次成功读取
+	todo  *todoManager         // s05: 会话级待办列表
 }
 
 func newSessionState() *sessionState {
-	return &sessionState{reads: map[string]readState{}}
+	return &sessionState{
+		reads: map[string]readState{},
+		todo:  newTodoManager(),
+	}
 }
 
 // safePath 把路径解析为绝对路径，并确保它位于 workdir 内（对齐参考实现的 safe_path）。
@@ -106,12 +110,13 @@ type toolHandler func(st *sessionState, args json.RawMessage) string
 
 // TOOL_HANDLERS：工具名 → 处理函数。加一个工具 = 这里加一行映射。
 var toolHandlers = map[string]toolHandler{
-	"bash":       bashHandler,
-	"read_file":  readHandler,
-	"write_file": writeHandler,
-	"edit_file":  editHandler,
-	"glob":       globHandler,
-	"grep":       grepHandler,
+	"bash":        bashHandler,
+	"read_file":   readHandler,
+	"write_file":  writeHandler,
+	"edit_file":   editHandler,
+	"glob":        globHandler,
+	"grep":        grepHandler,
+	"todo_write":  todoWriteHandler, // s05: 待办规划
 }
 
 func runTool(st *sessionState, name string, input json.RawMessage) string {
@@ -623,5 +628,27 @@ func allTools() []anthropic.ToolUnionParam {
 				"include": map[string]string{"type": "string"},
 			},
 			[]string{"pattern"}),
+		tool("todo_write",
+			"Create and manage a task list to plan complex work before executing. "+
+				"Use this to break multi-step tasks into ordered items. An update replaces the entire current list — "+
+				"include all items, not just changes. Status values: pending (not started), in_progress (exactly one), "+
+				"completed (done). At most 20 items per update.",
+			map[string]any{
+				"todos": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"content": map[string]string{"type": "string", "description": "The task description"},
+							"status": map[string]any{
+								"type":        "string",
+								"enum":        []string{"pending", "in_progress", "completed"},
+								"description": "Task status: pending (default), in_progress (exactly one at a time), or completed",
+							},
+						},
+					},
+				},
+			},
+			[]string{"todos"}),
 	}
 }

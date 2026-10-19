@@ -10,6 +10,8 @@ import (
 func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.MessageParam) ([]anthropic.MessageParam, error) {
 	// 会话级状态：read_file 的 mtime 去重（及后续 read-before-write 门控）挂在这里。
 	st := newSessionState()
+	// s05: 连续未使用 todo_write 的轮次数；>=3 时注入 reminder。
+	roundsSinceTodo := 0
 	for turn := 0; ; turn++ {
 		logInput(turn, messages)
 
@@ -22,9 +24,13 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		messages = append(messages, resp.ToParam())
 
 		var results []anthropic.ContentBlockParamUnion
+		usedTodoThisRound := false
 		for _, block := range resp.Content {
 			if block.Type != "tool_use" {
 				continue
+			}
+			if block.Name == "todo_write" {
+				usedTodoThisRound = true
 			}
 
 			hc := &hookContext{ToolName: block.Name, Input: block.Input}
@@ -60,6 +66,21 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 			}
 			return messages, nil
 		}
+
+		// s05: reminder —— 连续 3 轮没有 todo_write 时提醒模型更新计划。
+		// 用 text block 注入（不是 tool_result），因为没有对应的 tool_use；
+		// Anthropic API 不接受无 tool_use 的 tool_result。
+		if usedTodoThisRound {
+			roundsSinceTodo = 0
+		} else {
+			roundsSinceTodo++
+			if roundsSinceTodo >= 3 {
+				results = append(results, anthropic.NewTextBlock(
+					"<reminder>Consider using todo_write to update your task plan.</reminder>"))
+				roundsSinceTodo = 0
+			}
+		}
+
 		messages = append(messages, anthropic.NewUserMessage(results...))
 	}
 }

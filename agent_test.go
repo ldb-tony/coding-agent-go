@@ -179,3 +179,43 @@ func TestAgentLoopParallelToolUse(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentLoopTodoReminder 模拟连续 3 轮非 todo_write 的工具调用，验证 reminder 被注入。
+func TestAgentLoopTodoReminder(t *testing.T) {
+	setupLogPaths(t)
+
+	// 3 轮 bash（每轮一个 tool_use），然后 text response 退出。
+	resp1 := mustMessage(t, `{"id":"msg1","type":"message","role":"assistant","model":"mock","content":[{"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"echo a"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
+	resp2 := mustMessage(t, `{"id":"msg2","type":"message","role":"assistant","model":"mock","content":[{"type":"tool_use","id":"toolu_2","name":"bash","input":{"command":"echo b"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
+	resp3 := mustMessage(t, `{"id":"msg3","type":"message","role":"assistant","model":"mock","content":[{"type":"tool_use","id":"toolu_3","name":"bash","input":{"command":"echo c"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
+
+	client := &mockClient{responses: []*anthropic.Message{resp1, resp2, resp3, textResponse(t)}}
+	initial := []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("do stuff")),
+	}
+
+	messages, err := agentLoop(context.Background(), client, initial)
+	if err != nil {
+		t.Fatalf("agentLoop: %v", err)
+	}
+	if client.calls != 4 {
+		t.Fatalf("expected 4 Send calls, got %d", client.calls)
+	}
+
+	// 遍历所有 user message 的 text blocks 找 reminder
+	var reminderFound bool
+	for mi := 0; mi < len(messages); mi++ {
+		m := messages[mi]
+		if m.Role != anthropic.MessageParamRoleUser {
+			continue
+		}
+		for _, block := range m.Content {
+			if block.OfText != nil && strings.Contains(block.OfText.Text, "reminder") {
+				reminderFound = true
+			}
+		}
+	}
+	if !reminderFound {
+		t.Fatal("expected reminder text block after 3 consecutive non-todo_write rounds")
+	}
+}

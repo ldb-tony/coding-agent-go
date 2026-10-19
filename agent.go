@@ -17,7 +17,7 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 	for turn := 0; ; turn++ {
 		logInput(turn, messages)
 
-		resp, err := client.Send(ctx, systemPrompt(), messages, allTools(), 8000)
+		resp, err := client.Send(ctx, systemPrompt(st), messages, allTools(), 8000)
 		if err != nil {
 			return messages, err
 		}

@@ -56,7 +56,9 @@ func (c *anthropicClient) Send(ctx context.Context, system string, messages []an
 	})
 }
 
-func systemPrompt() string {
+// systemPrompt 拼接固定指令与 s07 的技能目录：全文 SKILL.md 不进 system prompt，
+// 只列 name + description，由模型在需要时用 load_skill 取全文。
+func systemPrompt(st *sessionState) string {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
@@ -69,9 +71,16 @@ func systemPrompt() string {
 		env = "Unix-like: the bash tool runs the system shell"
 	}
 
+	catalog := "none"
+	if st != nil && st.skills != nil {
+		catalog = st.skills.catalog()
+	}
+
 	return fmt.Sprintf(
 		"You are a coding agent at %s. Environment: %s.\n"+
 			"For complex multi-step tasks, use todo_write first to plan the steps before executing.\n"+
-			"Use the provided tools to solve tasks. Act, don't explain.",
-		cwd, env)
+			"Use the provided tools to solve tasks. Act, don't explain.\n\n"+
+			"Skills available:\n%s\n\n"+
+			"Use load_skill to read the full instructions when a skill applies.",
+		cwd, env, catalog)
 }

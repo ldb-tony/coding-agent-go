@@ -80,14 +80,19 @@ type readState struct {
 type sessionState struct {
 	reads  map[string]readState // absPath -> 最近一次成功读取
 	todo   *todoManager         // s05: 会话级待办列表
+	skills *skillLoader         // s07: 会话启动时扫描出的技能注册表
 	client LLMClient            // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
 	ctx    context.Context      // s06: 子代理继承父 loop 的 context（超时/取消）
 }
 
 func newSessionState() *sessionState {
+	// s07：技能目录在会话启动时扫描一次，之后 load_skill 只查内存注册表。
+	skills := newSkillLoader(filepath.Join(workdir, "skills"))
+	skills.scan()
 	return &sessionState{
-		reads: map[string]readState{},
-		todo:  newTodoManager(),
+		reads:  map[string]readState{},
+		todo:   newTodoManager(),
+		skills: skills,
 	}
 }
 
@@ -120,6 +125,7 @@ var toolHandlers = map[string]toolHandler{
 	"glob":       globHandler,
 	"grep":       grepHandler,
 	"todo_write": todoWriteHandler, // s05: 待办规划
+	"load_skill": loadSkillHandler, // s07: 技能按需加载
 }
 
 // task 的处理器在 init 里注册：taskHandler 经 runSubagent 复用 runTool，而 runTool
@@ -660,6 +666,12 @@ func allTools() []anthropic.ToolUnionParam {
 				},
 			},
 			[]string{"todos"}),
+		tool("load_skill",
+			"Load the full instructions of a skill listed under \"Skills available\" in the system prompt. "+
+				"Call this when a skill's description matches the current task, then follow the returned instructions. "+
+				"Returns the skill's full SKILL.md text; an unknown name returns the list of available skills.",
+			map[string]any{"name": map[string]string{"type": "string", "description": "Skill name as it appears in the catalog"}},
+			[]string{"name"}),
 		tool("task", "Run a subagent with fresh conversation context and return its final text.",
 			map[string]any{"prompt": map[string]string{"type": "string"}},
 			[]string{"prompt"}),

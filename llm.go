@@ -86,6 +86,8 @@ func systemPrompt(st *sessionState) string {
 	return fmt.Sprintf(
 		"You are a coding agent at %s. Environment: %s.\n"+
 			"For complex multi-step tasks, use todo_write first to plan the steps before executing.\n"+
+			"For slow commands (installs, builds, long test runs), set run_in_background=true on the "+
+			"bash tool so other work can continue; results arrive as <task_notification> in a later turn.\n"+
 			"Use the provided tools to solve tasks. Act, don't explain.\n\n"+
 			"Skills available:\n%s\n\n"+
 			"Use load_skill to read the full instructions when a skill applies.%s",

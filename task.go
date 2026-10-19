@@ -67,7 +67,13 @@ func runSubagent(st *sessionState, prompt string) string {
 				results = append(results, anthropic.NewToolResultBlock(block.ID, *blocked, true))
 				continue
 			}
-			output := runTool(st, block.Name, block.Input)
+			// s11: 子代理与父共用同一套工具分发，run_in_background 的 bash 同样转后台。
+			var output string
+			if shouldRunBackground(block.Name, block.Input) {
+				output = startBackgroundTask(block.Input)
+			} else {
+				output = runTool(st, block.Name, block.Input)
+			}
 			hc.Output = output
 			triggerHooks(EventPostToolUse, hc)
 			results = append(results, anthropic.NewToolResultBlock(block.ID, output, false))

@@ -80,6 +80,7 @@ type readState struct {
 type sessionState struct {
 	reads            map[string]readState // absPath -> 最近一次成功读取
 	todo             *todoManager         // s05: 会话级待办列表
+	tasks            *taskStore           // s10: .tasks/ 持久化任务图（跨会话）
 	skills           *skillLoader         // s07: 会话启动时扫描出的技能注册表
 	memory           *memoryStore         // s09: 跨会话记忆存储（.memory/）
 	recalledMemories string               // s09: 会话开始时召回的相关记忆全文（进 system prompt）
@@ -94,6 +95,7 @@ func newSessionState() *sessionState {
 	return &sessionState{
 		reads:  map[string]readState{},
 		todo:   newTodoManager(),
+		tasks:  newTaskStore(filepath.Join(workdir, tasksDirName)), // s10: 任务目录随 workdir
 		skills: skills,
 		memory: newMemoryStore(filepath.Join(workdir, memoryDirName)), // s09: 记忆目录随 workdir
 	}
@@ -130,6 +132,13 @@ var toolHandlers = map[string]toolHandler{
 	"todo_write": todoWriteHandler, // s05: 待办规划
 	"load_skill": loadSkillHandler, // s07: 技能按需加载
 	"compact":    compactHandler,   // s08: 请求历史压缩（实际压缩在 batch 结束后由 loop 触发）
+	// s10: 持久化任务图 —— 建图两阶段：先 create_task 拿 ID，再 update_task 加边
+	"create_task":   createTaskHandler,
+	"update_task":   updateTaskHandler,
+	"claim_task":    claimTaskHandler,
+	"complete_task": completeTaskHandler,
+	"get_task":      getTaskHandler,
+	"list_tasks":    listTaskHandler,
 }
 
 // task 的处理器在 init 里注册：taskHandler 经 runSubagent 复用 runTool，而 runTool
@@ -604,8 +613,14 @@ func allTools() []anthropic.ToolUnionParam {
 		return anthropic.ToolUnionParam{OfTool: &t}
 	}
 	return []anthropic.ToolUnionParam{
-		tool("bash", "Run a shell command.",
-			map[string]any{"command": map[string]string{"type": "string"}},
+		tool("bash",
+			"Run a shell command. For slow commands (dependency installs, builds, long test runs) "+
+				"set run_in_background=true: the call returns a task id immediately without blocking, "+
+				"and the result is delivered as a <task_notification> in a later turn.",
+			map[string]any{
+				"command":           map[string]string{"type": "string"},
+				"run_in_background": map[string]any{"type": "boolean", "description": "Run the command in the background and return a task id immediately."},
+			},
 			[]string{"command"}),
 		tool("read_file",
 			"Read a UTF-8 text file relative to the workspace. Output is line-numbered cat -n style, "+
@@ -683,6 +698,52 @@ func allTools() []anthropic.ToolUnionParam {
 			"Summarize earlier conversation to free context space. Call this after completing a stage "+
 				"when the next stage needs only a summary. The compaction runs after the current tool "+
 				"batch completes, so other tool calls in the same response still execute first.",
+			map[string]any{},
+			[]string{}),
+		// s10: 持久化任务图。建图两阶段：先创建全部节点拿到 ID，再用 update_task 加边
+		//（同一响应里的兄弟调用无法引用彼此新生成的 ID）。
+		tool("create_task",
+			"Create a persistent task record in .tasks/ that survives across sessions. "+
+				"Returns the full task JSON including its generated id. New tasks start pending with no "+
+				"dependencies. To build a task graph, create every task first, then wire dependencies with "+
+				"update_task using the returned ids.",
+			map[string]any{
+				"subject":     map[string]string{"type": "string", "description": "Short imperative summary of the task"},
+				"description": map[string]string{"type": "string", "description": "Details needed to resume the task later (optional)"},
+			},
+			[]string{"subject"}),
+		tool("update_task",
+			"Add blockedBy dependency edges to a pending, unowned task: it cannot be claimed until every "+
+				"dependency is completed. The target and each dependency must exist; self-dependencies and "+
+				"cycles are rejected; repeating an existing edge is safe and does not duplicate it.",
+			map[string]any{
+				"task_id":      map[string]string{"type": "string", "description": "ID returned by create_task"},
+				"addBlockedBy": map[string]any{"type": "array", "items": map[string]string{"type": "string"}, "description": "Task IDs this task must wait for"},
+			},
+			[]string{"task_id"}),
+		tool("claim_task",
+			"Claim a pending task before working on it: sets owner and moves pending → in_progress. "+
+				"Rejected when the task is not pending or any blockedBy dependency is not completed.",
+			map[string]any{
+				"task_id": map[string]string{"type": "string"},
+				"owner":   map[string]string{"type": "string", "description": "Claimer name (default: agent)"},
+			},
+			[]string{"task_id"}),
+		tool("complete_task",
+			"Mark an in_progress task owned by you as completed. Reports downstream pending tasks that "+
+				"just became unblocked (all their dependencies are now completed).",
+			map[string]any{
+				"task_id": map[string]string{"type": "string"},
+				"owner":   map[string]string{"type": "string", "description": "Must match the claimer (default: agent)"},
+			},
+			[]string{"task_id"}),
+		tool("get_task",
+			"Return the full task record as JSON, including description and blockedBy dependency details. "+
+				"Use this to recover the exact work to continue after a session restart.",
+			map[string]any{"task_id": map[string]string{"type": "string"}},
+			[]string{"task_id"}),
+		tool("list_tasks",
+			"List one-line summaries of all persisted tasks (id, status, subject, owner, dependencies).",
 			map[string]any{},
 			[]string{}),
 	}

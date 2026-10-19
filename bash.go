@@ -23,12 +23,7 @@ func runBashWithTimeout(command string, timeout time.Duration) string {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/C", command)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
-	}
+	cmd := shellCommand(ctx, command)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -50,4 +45,12 @@ func runBashWithTimeout(command string, timeout time.Duration) string {
 		output = string(runes[:maxBashOutputRunes])
 	}
 	return output
+}
+
+// shellCommand 构造跨平台的 shell 命令（同步 bash 与 s11 后台任务共用）。
+func shellCommand(ctx context.Context, command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/C", command)
+	}
+	return exec.CommandContext(ctx, "sh", "-c", command)
 }

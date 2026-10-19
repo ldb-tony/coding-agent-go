@@ -23,6 +23,7 @@ func main() {
 	go func() {
 		<-sigCh
 		fmt.Println()
+		backgroundTasks.stopAll() // s11: 退出前清理仍在运行的后台任务进程组
 		os.Exit(0)
 	}()
 
@@ -68,4 +69,6 @@ func main() {
 		}
 		fmt.Println()
 	}
+
+	backgroundTasks.stopAll() // s11: 正常退出（q/EOF）前清理仍在运行的后台任务进程组
 }

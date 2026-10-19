@@ -11,3 +11,6 @@ coding-agent-go
 # s08 上下文压缩产物（历史归档与落盘的大输出）
 .transcripts/
 .task_outputs/
+
+# s10 任务系统产物（.tasks/ 下的任务记录属于工作区运行时状态）
+.tasks/

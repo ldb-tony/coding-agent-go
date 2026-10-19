@@ -23,6 +23,9 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 	// s08: API 返回 prompt_too_long 时的兜底重试次数
 	reactiveRetries := 0
 	for turn := 0; ; turn++ {
+		// s11: 每轮模型调用前收集已完成的后台任务，以 <task_notification> 注入对话。
+		// 已完成的任务不会主动唤醒 Agent，只在 loop 转起来时被收集。
+		messages = injectBackgroundResults(messages)
 		// s08: 每轮模型调用前先跑压缩流水线；只在超预算时才真正动手
 		messages = cpt.prepare(ctx, messages, activeRequest)
 		logInput(turn, messages)
@@ -72,8 +75,15 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 				continue
 			}
 
-			// 唯一的改动点：从硬编码 runBash 变成分发查找
-			output := runTool(st, block.Name, block.Input)
+			// 唯一的改动点：从硬编码 runBash 变成分发查找。
+			// s11: run_in_background 的 bash 调用交给后台 goroutine，本轮先返回带
+			// bg_id 的占位结果，让 loop 继续处理后续工具调用与下一轮。
+			var output string
+			if shouldRunBackground(block.Name, block.Input) {
+				output = startBackgroundTask(block.Input)
+			} else {
+				output = runTool(st, block.Name, block.Input)
+			}
 			if runes := []rune(output); len(runes) > 200 {
 				fmt.Println(string(runes[:200]))
 			} else {

@@ -69,20 +69,5 @@ func systemPrompt() string {
 		env = "Unix-like: the bash tool runs the system shell"
 	}
 
-	return fmt.Sprintf("You are a coding agent at %s. Environment: %s. Use bash to solve tasks. Act, don't explain.", cwd, env)
-}
-
-func bashTool() []anthropic.ToolUnionParam {
-	tool := anthropic.ToolParam{
-		Name:        "bash",
-		Description: anthropic.String("Run a shell command."),
-		InputSchema: anthropic.ToolInputSchemaParam{
-			Type: "object",
-			Properties: map[string]any{
-				"command": map[string]string{"type": "string"},
-			},
-			Required: []string{"command"},
-		},
-	}
-	return []anthropic.ToolUnionParam{{OfTool: &tool}}
+	return fmt.Sprintf("You are a coding agent at %s. Environment: %s. Use the provided tools to solve tasks. Act, don't explain.", cwd, env)
 }

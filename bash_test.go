@@ -8,22 +8,6 @@ import (
 )
 
 func TestRunBash(t *testing.T) {
-	t.Run("dangerous commands are blocked", func(t *testing.T) {
-		blocked := []string{
-			"sudo ls",
-			"rm -rf /",
-			"rm -rf /tmp/x",
-			"shutdown now",
-			"reboot",
-			"echo hi > /dev/null",
-		}
-		for _, cmd := range blocked {
-			if got := runBash(cmd); got != "Error: Dangerous command blocked" {
-				t.Errorf("runBash(%q) = %q, want %q", cmd, got, "Error: Dangerous command blocked")
-			}
-		}
-	})
-
 	t.Run("normal command output", func(t *testing.T) {
 		if got := runBash("echo hello"); got != "hello" {
 			t.Fatalf("runBash(echo hello) = %q, want %q", got, "hello")

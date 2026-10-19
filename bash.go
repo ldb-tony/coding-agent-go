@@ -15,25 +15,11 @@ const (
 	maxBashOutputRunes = 50000
 )
 
-var dangerousCommandSubstrings = []string{
-	"rm -rf /",
-	"sudo",
-	"shutdown",
-	"reboot",
-	"> /dev/",
-}
-
 func runBash(command string) string {
 	return runBashWithTimeout(command, defaultBashTimeout)
 }
 
 func runBashWithTimeout(command string, timeout time.Duration) string {
-	for _, bad := range dangerousCommandSubstrings {
-		if strings.Contains(command, bad) {
-			return "Error: Dangerous command blocked"
-		}
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

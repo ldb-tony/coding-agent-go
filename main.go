@@ -26,7 +26,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	fmt.Println("s03: Permission")
+	fmt.Println("s04: Hooks")
 	fmt.Printf("Inputs logged to %s\n", inputLogPath)
 	fmt.Printf("Responses logged to %s\n", agentLogPath)
 	fmt.Println("Enter a question, press Enter to send. Type q to quit.")
@@ -37,7 +37,7 @@ func main() {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Print("\033[36ms03 >> \033[0m")
+		fmt.Print("\033[36ms04 >> \033[0m")
 		if !scanner.Scan() { // EOF (Ctrl-D)
 			break
 		}
@@ -46,6 +46,8 @@ func main() {
 			break
 		}
 
+		// s04：用户输入之后、进入 LLM 之前触发 UserPromptSubmit（上下文注入/输入校验）。
+		triggerHooks(EventUserPromptSubmit, &hookContext{Query: query})
 		history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(query)))
 		var err error
 		history, err = agentLoop(context.Background(), client, history)

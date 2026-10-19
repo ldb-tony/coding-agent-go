@@ -152,7 +152,7 @@ func readHandler(st *sessionState, args json.RawMessage) string {
 	return runRead(st, in.Path, offset, limit)
 }
 
-func writeHandler(_ *sessionState, args json.RawMessage) string {
+func writeHandler(st *sessionState, args json.RawMessage) string {
 	var in struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -160,7 +160,7 @@ func writeHandler(_ *sessionState, args json.RawMessage) string {
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "Error: invalid arguments"
 	}
-	return runWrite(in.Path, in.Content)
+	return runWrite(st, in.Path, in.Content)
 }
 
 func editHandler(_ *sessionState, args json.RawMessage) string {
@@ -311,18 +311,90 @@ func lineNumberWidth(totalLines int) int {
 	return w
 }
 
-func runWrite(path, content string) string {
+// runWrite 全量覆写文件。对齐 Claude Code Write 的门控语义：
+// 覆盖已存在文件前，本会话必须有该文件的全量读取记录（部分读不算），
+// 且读取之后 mtime 未变（变了说明用户/linter/并行工具改动过，需重新 Read）；
+// 新建文件豁免门控。内容强制以 LF 行尾落盘，消除 CRLF 噪音 diff。
+// 写入走同目录临时文件 + rename，目标路径永远不会是半截状态。
+func runWrite(st *sessionState, path, content string) string {
 	abs, err := safePath(path)
 	if err != nil {
 		return "Error: " + err.Error()
 	}
+
+	perm := os.FileMode(0o644)
+	if fi, err := os.Stat(abs); err == nil {
+		perm = fi.Mode().Perm() // 覆写保留原文件权限位
+		if st != nil {
+			last, ok := st.reads[abs]
+			if !ok || !last.fullView {
+				return fmt.Sprintf("Error: %s has not been read yet. Read it first before writing to it.", path)
+			}
+			if fi.ModTime().After(last.mtime) {
+				return fmt.Sprintf("Error: %s has been modified since read. Read it again before writing to it.", path)
+			}
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "Error: " + err.Error()
+	} // ENOENT → 新建文件，豁免门控
+
+	// 强制 LF：CRLF 与孤立 CR 统一归一为 \n。
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return "Error: " + err.Error()
 	}
-	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+	if err := atomicWriteFile(abs, []byte(content), perm); err != nil {
 		return "Error: " + err.Error()
 	}
+
+	// 写后刷新读取状态：刚写入的内容即本会话的最新认知，允许连续 Write，
+	// 也让后续 Read 的 mtime 去重正确命中。区间计算与 runRead 保持一致。
+	if st != nil {
+		if fi, err := os.Stat(abs); err == nil {
+			start, end := 0, 0
+			if trimmed := strings.TrimRight(content, "\n"); trimmed != "" {
+				start, end = 1, len(strings.Split(trimmed, "\n"))
+			}
+			st.reads[abs] = readState{mtime: fi.ModTime(), start: start, end: end, fullView: true}
+		}
+	}
 	return fmt.Sprintf("Wrote %d bytes to %s", len(content), path)
+}
+
+// atomicWriteFile 先写同目录临时文件再 rename，保证目标路径要么旧内容完整、
+// 要么新内容完整（WriteFile 直接 O_TRUNC，写一半崩溃会留下损坏文件）。
+func atomicWriteFile(abs string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(abs), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if tmp != "" {
+			os.Remove(tmp) // 失败路径清理临时文件
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		return err
+	}
+	tmp = "" // rename 成功，取消清理
+	return nil
 }
 
 func runEdit(path, oldText, newText string) string {
@@ -524,7 +596,11 @@ func allTools() []anthropic.ToolUnionParam {
 				"limit":  map[string]string{"type": "integer", "description": "Number of lines to read (default 2000). Only provide for large files; 0 disables the line cap."},
 			},
 			[]string{"path"}),
-		tool("write_file", "Write content to a file, overwriting it.",
+		tool("write_file",
+			"Write content to a file, overwriting it entirely. If the file already exists, you must "+
+				"have read it with read_file first (a full read; a partial page does not count), and the "+
+				"file must not have changed since that read — otherwise the write is refused and you must "+
+				"read it again. Creating a new file needs no prior read. Content is always written with LF line endings.",
 			map[string]any{
 				"path":    map[string]string{"type": "string"},
 				"content": map[string]string{"type": "string"},

@@ -128,7 +128,7 @@ func TestRunRead(t *testing.T) {
 func TestRunWrite(t *testing.T) {
 	dir := setupWorkdir(t)
 
-	got := runWrite("out/test.txt", "hello")
+	got := runWrite(newSessionState(), "out/test.txt", "hello")
 	if got != "Wrote 5 bytes to out/test.txt" {
 		t.Fatalf("got %q", got)
 	}
@@ -353,10 +353,13 @@ func TestRunWriteEdgeCases(t *testing.T) {
 	dir := setupWorkdir(t)
 
 	t.Run("overwrite existing file", func(t *testing.T) {
-		if got := runWrite("f.txt", "first"); !strings.Contains(got, "Wrote 5 bytes") {
+		st := newSessionState()
+		if got := runWrite(st, "f.txt", "first"); !strings.Contains(got, "Wrote 5 bytes") {
 			t.Fatalf("first write: %q", got)
 		}
-		if got := runWrite("f.txt", "second"); !strings.Contains(got, "Wrote 6 bytes") {
+		// 写后状态已刷新，允许连续写；这里再显式 Read 一次模拟真实流程
+		runRead(st, "f.txt", 0, nil)
+		if got := runWrite(st, "f.txt", "second"); !strings.Contains(got, "Wrote 6 bytes") {
 			t.Fatalf("second write: %q", got)
 		}
 		data, err := os.ReadFile(filepath.Join(dir, "f.txt"))
@@ -366,11 +369,109 @@ func TestRunWriteEdgeCases(t *testing.T) {
 	})
 
 	t.Run("path escaping workdir is denied", func(t *testing.T) {
-		if got := runWrite("../escape.txt", "x"); !strings.HasPrefix(got, "Error:") {
+		if got := runWrite(newSessionState(), "../escape.txt", "x"); !strings.HasPrefix(got, "Error:") {
 			t.Fatalf("got %q", got)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "..", "escape.txt")); !os.IsNotExist(err) {
 			t.Fatalf("file should not be created outside workdir")
+		}
+	})
+}
+
+// TestRunWriteGate 覆盖 read-before-write 门控与 LF 归一：
+// 未读拒写、部分读拒写、读后过期拒写、写后状态刷新、CRLF 落盘为 LF。
+func TestRunWriteGate(t *testing.T) {
+	dir := setupWorkdir(t)
+
+	t.Run("overwrite unread file is refused and file unchanged", func(t *testing.T) {
+		st := newSessionState()
+		mustWrite(t, dir, "unread.txt", "original")
+		got := runWrite(st, "unread.txt", "evil")
+		if !strings.Contains(got, "has not been read yet") {
+			t.Fatalf("got %q", got)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "unread.txt"))
+		if string(data) != "original" {
+			t.Fatalf("file was modified: %q", data)
+		}
+	})
+
+	t.Run("partial read does not grant write access", func(t *testing.T) {
+		st := newSessionState()
+		mustWrite(t, dir, "p.txt", "l1\nl2\nl3\n")
+		got := runRead(st, "p.txt", 2, nil) // 只读第 2 行起，非全量
+		if strings.HasPrefix(got, "Error:") {
+			t.Fatalf("read: %q", got)
+		}
+		if got := runWrite(st, "p.txt", "x"); !strings.Contains(got, "has not been read yet") {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("full read then write succeeds", func(t *testing.T) {
+		st := newSessionState()
+		mustWrite(t, dir, "ok.txt", "old\n")
+		runRead(st, "ok.txt", 0, nil)
+		if got := runWrite(st, "ok.txt", "new\n"); !strings.Contains(got, "Wrote 4 bytes") {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("stale read (file modified since) is refused", func(t *testing.T) {
+		st := newSessionState()
+		abs := mustWrite(t, dir, "stale.txt", "v1\n")
+		runRead(st, "stale.txt", 0, nil)
+		// 模拟外部改动：内容 + mtime 一起变
+		mustWrite(t, dir, "stale.txt", "v2\n")
+		future := time.Now().Add(time.Hour)
+		if err := os.Chtimes(abs, future, future); err != nil {
+			t.Fatal(err)
+		}
+		got := runWrite(st, "stale.txt", "v3\n")
+		if !strings.Contains(got, "has been modified since read") {
+			t.Fatalf("got %q", got)
+		}
+		data, _ := os.ReadFile(abs)
+		if string(data) != "v2\n" {
+			t.Fatalf("file was modified: %q", data)
+		}
+	})
+
+	t.Run("successful write refreshes read state for consecutive writes", func(t *testing.T) {
+		st := newSessionState()
+		mustWrite(t, dir, "chain.txt", "a\n")
+		runRead(st, "chain.txt", 0, nil)
+		if got := runWrite(st, "chain.txt", "b\n"); strings.HasPrefix(got, "Error:") {
+			t.Fatalf("first write: %q", got)
+		}
+		// 不再 Read，直接第二次写也应成功（写后状态已刷新）
+		if got := runWrite(st, "chain.txt", "c\n"); strings.HasPrefix(got, "Error:") {
+			t.Fatalf("second write: %q", got)
+		}
+	})
+
+	t.Run("CRLF and lone CR are normalized to LF on disk", func(t *testing.T) {
+		st := newSessionState()
+		got := runWrite(st, "crlf.txt", "a\r\nb\rc\n")
+		if strings.HasPrefix(got, "Error:") {
+			t.Fatalf("got %q", got)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "crlf.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != "a\nb\nc\n" {
+			t.Fatalf("on-disk content: %q", data)
+		}
+		if !strings.Contains(got, "Wrote 6 bytes") {
+			t.Fatalf("byte count should reflect normalized content: %q", got)
+		}
+	})
+
+	t.Run("new file needs no prior read", func(t *testing.T) {
+		st := newSessionState()
+		if got := runWrite(st, "fresh/new.txt", "x"); !strings.Contains(got, "Wrote 1 bytes") {
+			t.Fatalf("got %q", got)
 		}
 	})
 }

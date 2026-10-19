@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -28,20 +27,13 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 				continue
 			}
 
-			// 终端回显：bash 只显示命令，其他工具显示参数 JSON
-			var in struct {
-				Command string `json:"command"`
-			}
-			_ = json.Unmarshal(block.Input, &in)
-			label := in.Command
-			if label == "" {
-				label = string(block.Input)
-			}
-			fmt.Printf("\033[33m$ %s %s\033[0m\n", block.Name, label)
+			hc := &hookContext{ToolName: block.Name, Input: block.Input}
 
-			if !checkPermission(block.Name, block.Input) {
-				fmt.Println("Permission denied.")
-				results = append(results, anthropic.NewToolResultBlock(block.ID, "Permission denied.", true))
+			// s04：权限校验、调用日志等扩展逻辑从 loop 里移出，改由 PreToolUse hook 决定。
+			// hook 返回非 nil 表示拦截本次工具调用，返回值作为 tool_result 回喂模型。
+			if blocked := triggerHooks(EventPreToolUse, hc); blocked != nil {
+				fmt.Println(*blocked)
+				results = append(results, anthropic.NewToolResultBlock(block.ID, *blocked, true))
 				continue
 			}
 
@@ -53,10 +45,19 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 				fmt.Println(output)
 			}
 
+			// s04：执行之后的副作用/输出检查走 PostToolUse（返回值不影响控制流）。
+			hc.Output = output
+			triggerHooks(EventPostToolUse, hc)
+
 			results = append(results, anthropic.NewToolResultBlock(block.ID, output, false))
 		}
 
 		if len(results) == 0 {
+			// s04：loop 即将退出时触发 Stop；返回非 nil 则注入消息并继续循环。
+			if force := triggerHooks(EventStop, &hookContext{Messages: messages}); force != nil {
+				messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(*force)))
+				continue
+			}
 			return messages, nil
 		}
 		messages = append(messages, anthropic.NewUserMessage(results...))

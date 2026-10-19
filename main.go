@@ -50,7 +50,9 @@ func main() {
 		triggerHooks(EventUserPromptSubmit, &hookContext{Query: query})
 		history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(query)))
 		var err error
-		history, err = agentLoop(context.Background(), client, history)
+		// s08: activeRequest 显式传给 loop —— tool_result 也是 role=user，
+		// compact 时无法从历史里区分"当前用户请求"与"工具返回"
+		history, err = agentLoop(context.Background(), client, history, query)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agent loop: %v\n", err)
 			continue

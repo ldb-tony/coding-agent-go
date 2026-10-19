@@ -201,7 +201,7 @@ func TestAgentLoopPermissionDenied(t *testing.T) {
 		anthropic.NewUserMessage(anthropic.NewTextBlock("run both")),
 	}
 
-	messages, err := agentLoop(context.Background(), client, initial)
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
 	if err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestAgentLoopGate2Ask(t *testing.T) {
 			anthropic.NewUserMessage(anthropic.NewTextBlock("remove file")),
 		}
 
-		messages, err := agentLoop(context.Background(), client, initial)
+		messages, err := agentLoop(context.Background(), client, initial, "test request")
 		if err != nil {
 			t.Fatalf("agentLoop: %v", err)
 		}
@@ -281,7 +281,7 @@ func TestAgentLoopGate2Ask(t *testing.T) {
 			anthropic.NewUserMessage(anthropic.NewTextBlock("remove file")),
 		}
 
-		messages, err := agentLoop(context.Background(), client, initial)
+		messages, err := agentLoop(context.Background(), client, initial, "test request")
 		if err != nil {
 			t.Fatalf("agentLoop: %v", err)
 		}

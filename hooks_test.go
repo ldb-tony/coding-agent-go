@@ -193,7 +193,7 @@ func TestAgentLoopPreToolUseBlocksTool(t *testing.T) {
 	client := &mockClient{responses: []*anthropic.Message{toolUseResp, textResponse(t)}}
 	initial := []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("run echo"))}
 
-	messages, err := agentLoop(context.Background(), client, initial)
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
 	if err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestAgentLoopPostToolUseSeesOutput(t *testing.T) {
 	client := &mockClient{responses: []*anthropic.Message{toolUseResp, textResponse(t)}}
 	initial := []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("run echo"))}
 
-	if _, err := agentLoop(context.Background(), client, initial); err != nil {
+	if _, err := agentLoop(context.Background(), client, initial, "test request"); err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}
 	if !strings.Contains(seen, "hi") {
@@ -249,7 +249,7 @@ func TestAgentLoopStopHookForcesContinuation(t *testing.T) {
 	client := &mockClient{responses: []*anthropic.Message{textResponse(t), textResponse(t)}}
 	initial := []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))}
 
-	messages, err := agentLoop(context.Background(), client, initial)
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
 	if err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}

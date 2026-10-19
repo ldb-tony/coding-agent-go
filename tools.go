@@ -78,11 +78,13 @@ type readState struct {
 
 // sessionState 是会话级状态，挂在 agentLoop 上而不是全局变量。
 type sessionState struct {
-	reads  map[string]readState // absPath -> 最近一次成功读取
-	todo   *todoManager         // s05: 会话级待办列表
-	skills *skillLoader         // s07: 会话启动时扫描出的技能注册表
-	client LLMClient            // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
-	ctx    context.Context      // s06: 子代理继承父 loop 的 context（超时/取消）
+	reads            map[string]readState // absPath -> 最近一次成功读取
+	todo             *todoManager         // s05: 会话级待办列表
+	skills           *skillLoader         // s07: 会话启动时扫描出的技能注册表
+	memory           *memoryStore         // s09: 跨会话记忆存储（.memory/）
+	recalledMemories string               // s09: 会话开始时召回的相关记忆全文（进 system prompt）
+	client           LLMClient            // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
+	ctx              context.Context      // s06: 子代理继承父 loop 的 context（超时/取消）
 }
 
 func newSessionState() *sessionState {
@@ -93,6 +95,7 @@ func newSessionState() *sessionState {
 		reads:  map[string]readState{},
 		todo:   newTodoManager(),
 		skills: skills,
+		memory: newMemoryStore(filepath.Join(workdir, memoryDirName)), // s09: 记忆目录随 workdir
 	}
 }
 
@@ -126,6 +129,7 @@ var toolHandlers = map[string]toolHandler{
 	"grep":       grepHandler,
 	"todo_write": todoWriteHandler, // s05: 待办规划
 	"load_skill": loadSkillHandler, // s07: 技能按需加载
+	"compact":    compactHandler,   // s08: 请求历史压缩（实际压缩在 batch 结束后由 loop 触发）
 }
 
 // task 的处理器在 init 里注册：taskHandler 经 runSubagent 复用 runTool，而 runTool
@@ -675,5 +679,11 @@ func allTools() []anthropic.ToolUnionParam {
 		tool("task", "Run a subagent with fresh conversation context and return its final text.",
 			map[string]any{"prompt": map[string]string{"type": "string"}},
 			[]string{"prompt"}),
+		tool("compact",
+			"Summarize earlier conversation to free context space. Call this after completing a stage "+
+				"when the next stage needs only a summary. The compaction runs after the current tool "+
+				"batch completes, so other tool calls in the same response still execute first.",
+			map[string]any{},
+			[]string{}),
 	}
 }

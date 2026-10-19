@@ -261,7 +261,7 @@ func TestAgentLoopDispatchesFileTool(t *testing.T) {
 		anthropic.NewUserMessage(anthropic.NewTextBlock("read it")),
 	}
 
-	messages, err := agentLoop(context.Background(), client, initial)
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
 	if err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestAgentLoopDispatchesFileTool(t *testing.T) {
 // TestAllToolsRegistered 防止新增工具时漏注册 schema（allTools 与 toolHandlers 必须一一对应）。
 func TestAllToolsRegistered(t *testing.T) {
 	tools := allTools()
-	want := []string{"bash", "read_file", "write_file", "edit_file", "glob", "grep", "todo_write", "load_skill", "task"}
+	want := []string{"bash", "read_file", "write_file", "edit_file", "glob", "grep", "todo_write", "load_skill", "task", "compact"}
 	if len(tools) != len(want) {
 		t.Fatalf("allTools returned %d tools, want %d", len(tools), len(want))
 	}

@@ -10,9 +10,9 @@ import (
 type todoStatus string
 
 const (
-	todoPending   todoStatus = "pending"
+	todoPending    todoStatus = "pending"
 	todoInProgress todoStatus = "in_progress"
-	todoCompleted todoStatus = "completed"
+	todoCompleted  todoStatus = "completed"
 )
 
 const (

@@ -3,36 +3,63 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.MessageParam) ([]anthropic.MessageParam, error) {
+func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.MessageParam, activeRequest string) ([]anthropic.MessageParam, error) {
 	// 会话级状态：read_file 的 mtime 去重（及后续 read-before-write 门控）挂在这里。
 	st := newSessionState()
 	st.client = client // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
 	st.ctx = ctx       // s06: 子代理继承父 loop 的 context（超时/取消）
+	// s08: 上下文压缩器；每个 agentLoop 一个实例（summarize 要复用 client）
+	cpt := newCompactor(workdir, client)
+	// s09: 会话开始时召回相关记忆（空库时跳过，不发起额外模型调用）；
+	// 召回结果挂在 st 上，systemPrompt 每轮拼进 system。
+	st.recallMemories(activeRequest)
 	// s05: 连续未使用 todo_write 的轮次数；>=3 时注入 reminder。
 	roundsSinceTodo := 0
+	// s08: API 返回 prompt_too_long 时的兜底重试次数
+	reactiveRetries := 0
 	for turn := 0; ; turn++ {
+		// s08: 每轮模型调用前先跑压缩流水线；只在超预算时才真正动手
+		messages = cpt.prepare(ctx, messages, activeRequest)
 		logInput(turn, messages)
 
 		resp, err := client.Send(ctx, systemPrompt(st), messages, allTools(), 8000)
 		if err != nil {
+			// s08: prompt_too_long 时归档 + 总结 + 保留最近 5 条，最多重试 1 次
+			errMsg := strings.ToLower(err.Error())
+			tooLong := strings.Contains(errMsg, "prompt_too_long") || strings.Contains(errMsg, "too many tokens")
+			if tooLong && reactiveRetries < maxReactiveRetries {
+				fmt.Println("[reactive compact]")
+				messages = cpt.reactiveCompact(ctx, messages, activeRequest)
+				reactiveRetries++
+				continue
+			}
 			return messages, err
 		}
+		reactiveRetries = 0 // 成功一次后重置，下一次 prompt_too_long 仍能兜底
 		logResponse(turn, resp)
 
 		messages = append(messages, resp.ToParam())
 
 		var results []anthropic.ContentBlockParamUnion
 		usedTodoThisRound := false
+		compactRequested := false
 		for _, block := range resp.Content {
 			if block.Type != "tool_use" {
 				continue
 			}
 			if block.Name == "todo_write" {
 				usedTodoThisRound = true
+			}
+			// s08: compact 工具本身不压缩，只打个标记；本批其他工具照常执行，
+			// 等整个 batch 的 tool_result 都落进 messages 后再统一 compact_history，
+			// 避免产生孤儿 tool_result（没有对应 tool_use 的 API 400）
+			if block.Name == "compact" {
+				compactRequested = true
 			}
 
 			hc := &hookContext{ToolName: block.Name, Input: block.Input}
@@ -66,6 +93,11 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 				messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(*force)))
 				continue
 			}
+			// s09: 轮末抽取可复用知识（失败只告警，不影响正常返回）；
+			// 有新记录且库存达到阈值时顺带触发合并。
+			if stored := st.extractMemories(messages); stored {
+				st.consolidateMemories()
+			}
 			return messages, nil
 		}
 
@@ -84,5 +116,10 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		}
 
 		messages = append(messages, anthropic.NewUserMessage(results...))
+
+		// s08: 模型请求 compact 时，在整个 batch 的 tool_result 都进 messages 之后再压缩
+		if compactRequested {
+			messages = cpt.compactHistory(ctx, messages, activeRequest)
+		}
 	}
 }

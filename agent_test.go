@@ -45,6 +45,9 @@ func setupLogPaths(t *testing.T) {
 		agentLogPath = oldAgent
 		inputLogPath = oldInput
 	})
+	// s09：loop 级测试默认关闭记忆召回/抽取——两者会额外消耗 mock 响应序列，
+	// 打乱既有测试的 calls 计数。需要记忆行为的测试随后用 setMemoryEnabled(t, true) 打开。
+	setMemoryEnabled(t, false)
 }
 
 func toolResultTexts(t *testing.T, msg anthropic.MessageParam) []*anthropic.ToolResultBlockParam {
@@ -66,7 +69,7 @@ func TestAgentLoopExitsWithoutToolUse(t *testing.T) {
 		anthropic.NewUserMessage(anthropic.NewTextBlock("hello")),
 	}
 
-	messages, err := agentLoop(context.Background(), client, initial)
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
 	if err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}
@@ -93,7 +96,7 @@ func TestAgentLoopContinuesWithToolUse(t *testing.T) {
 		anthropic.NewUserMessage(anthropic.NewTextBlock("run echo")),
 	}
 
-	messages, err := agentLoop(context.Background(), client, initial)
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
 	if err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}
@@ -144,7 +147,7 @@ func TestAgentLoopParallelToolUse(t *testing.T) {
 		anthropic.NewUserMessage(anthropic.NewTextBlock("run both")),
 	}
 
-	messages, err := agentLoop(context.Background(), client, initial)
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
 	if err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}
@@ -194,7 +197,7 @@ func TestAgentLoopTodoReminder(t *testing.T) {
 		anthropic.NewUserMessage(anthropic.NewTextBlock("do stuff")),
 	}
 
-	messages, err := agentLoop(context.Background(), client, initial)
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
 	if err != nil {
 		t.Fatalf("agentLoop: %v", err)
 	}

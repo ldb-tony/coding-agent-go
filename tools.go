@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,7 +67,7 @@ func (n *flexInt) UnmarshalJSON(b []byte) error {
 }
 
 // readState 记录一次成功读取的视图：用于 mtime 去重，
-// 也是后续 read-before-write 门控的状态基础（与 Write 同期启用）。
+// 也是 read-before-write/edit 门控的状态基础（Write 与 Edit 共用）。
 type readState struct {
 	mtime    time.Time
 	start    int  // 返回区间起始行（1-based，含）；空文件为 0
@@ -86,6 +85,7 @@ type sessionState struct {
 	recalledMemories string               // s09: 会话开始时召回的相关记忆全文（进 system prompt）
 	client           LLMClient            // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
 	ctx              context.Context      // s06: 子代理继承父 loop 的 context（超时/取消）
+	shellCwd         string               // s12: bash cwd 持久化（跨调用保持工作目录）
 }
 
 func newSessionState() *sessionState {
@@ -156,12 +156,16 @@ func runTool(st *sessionState, name string, input json.RawMessage) string {
 	return handler(st, input)
 }
 
-func bashHandler(_ *sessionState, args json.RawMessage) string {
+func bashHandler(st *sessionState, args json.RawMessage) string {
 	var in struct {
 		Command string `json:"command"`
 	}
 	_ = json.Unmarshal(args, &in)
-	return runBash(in.Command)
+	output, newCwd := runBashWithCwd(in.Command, st.shellCwd)
+	if newCwd != "" {
+		st.shellCwd = newCwd
+	}
+	return output
 }
 
 func readHandler(st *sessionState, args json.RawMessage) string {
@@ -197,38 +201,36 @@ func writeHandler(st *sessionState, args json.RawMessage) string {
 	return runWrite(st, in.Path, in.Content)
 }
 
-func editHandler(_ *sessionState, args json.RawMessage) string {
+func editHandler(st *sessionState, args json.RawMessage) string {
 	var in struct {
-		Path    string `json:"path"`
-		OldText string `json:"old_text"`
-		NewText string `json:"new_text"`
+		Path       string `json:"path"`
+		OldText    string `json:"old_text"`
+		NewText    string `json:"new_text"`
+		ReplaceAll bool   `json:"replace_all"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "Error: invalid arguments"
 	}
-	return runEdit(in.Path, in.OldText, in.NewText)
+	return runEdit(st, in.Path, in.OldText, in.NewText, in.ReplaceAll)
 }
 
 func globHandler(_ *sessionState, args json.RawMessage) string {
 	var in struct {
 		Pattern string `json:"pattern"`
+		Path    string `json:"path"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "Error: invalid arguments"
 	}
-	return runGlob(in.Pattern)
+	return runGlob(in.Pattern, in.Path)
 }
 
 func grepHandler(_ *sessionState, args json.RawMessage) string {
-	var in struct {
-		Pattern string `json:"pattern"`
-		Path    string `json:"path"`
-		Include string `json:"include"`
-	}
+	var in runGrepParams
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "Error: invalid arguments"
 	}
-	return runGrep(in.Pattern, in.Path, in.Include)
+	return runGrep(in)
 }
 
 // runRead 读取 UTF-8 文本文件，返回 cat -n 风格的行号文本。
@@ -345,32 +347,60 @@ func lineNumberWidth(totalLines int) int {
 	return w
 }
 
-// runWrite 全量覆写文件。对齐 Claude Code Write 的门控语义：
-// 覆盖已存在文件前，本会话必须有该文件的全量读取记录（部分读不算），
-// 且读取之后 mtime 未变（变了说明用户/linter/并行工具改动过，需重新 Read）；
-// 新建文件豁免门控。内容强制以 LF 行尾落盘，消除 CRLF 噪音 diff。
+// checkWritable 实现 read-before-write/edit 门控（Write 与 Edit 共用）：
+// 已存在的文件在本会话中必须有全量读取记录（部分读不算），且读取之后 mtime
+// 未变——变了说明用户/linter/并行工具改动过，需重新 Read；新建文件（ENOENT）
+// 豁免门控。返回落盘应使用的权限位（已存在文件保留原权限位，新建 0o644）。
+func checkWritable(st *sessionState, abs, path string) (os.FileMode, error) {
+	fi, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0o644, nil // 新建文件，豁免门控
+		}
+		return 0o644, err
+	}
+	perm := fi.Mode().Perm()
+	if st != nil {
+		last, ok := st.reads[abs]
+		if !ok || !last.fullView {
+			return perm, fmt.Errorf("%s has not been read yet. Read it first before writing to it.", path)
+		}
+		if fi.ModTime().After(last.mtime) {
+			return perm, fmt.Errorf("%s has been modified since read. Read it again before writing to it.", path)
+		}
+	}
+	return perm, nil
+}
+
+// markWritten 在 write/edit 成功落盘后刷新读取状态：落盘内容即本会话的最新认知，
+// 允许连续写入/编辑，也让后续 Read 的 mtime 去重正确命中。区间计算与 runRead 保持一致。
+func (st *sessionState) markWritten(abs, content string) {
+	if st == nil {
+		return
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return
+	}
+	start, end := 0, 0
+	if trimmed := strings.TrimRight(content, "\n"); trimmed != "" {
+		start, end = 1, len(strings.Split(trimmed, "\n"))
+	}
+	st.reads[abs] = readState{mtime: fi.ModTime(), start: start, end: end, fullView: true}
+}
+
+// runWrite 全量覆写文件。内容强制以 LF 行尾落盘，消除 CRLF 噪音 diff；
 // 写入走同目录临时文件 + rename，目标路径永远不会是半截状态。
+// read-before 门控语义见 checkWritable。
 func runWrite(st *sessionState, path, content string) string {
 	abs, err := safePath(path)
 	if err != nil {
 		return "Error: " + err.Error()
 	}
-
-	perm := os.FileMode(0o644)
-	if fi, err := os.Stat(abs); err == nil {
-		perm = fi.Mode().Perm() // 覆写保留原文件权限位
-		if st != nil {
-			last, ok := st.reads[abs]
-			if !ok || !last.fullView {
-				return fmt.Sprintf("Error: %s has not been read yet. Read it first before writing to it.", path)
-			}
-			if fi.ModTime().After(last.mtime) {
-				return fmt.Sprintf("Error: %s has been modified since read. Read it again before writing to it.", path)
-			}
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	perm, err := checkWritable(st, abs, path)
+	if err != nil {
 		return "Error: " + err.Error()
-	} // ENOENT → 新建文件，豁免门控
+	}
 
 	// 强制 LF：CRLF 与孤立 CR 统一归一为 \n。
 	content = strings.ReplaceAll(content, "\r\n", "\n")
@@ -383,17 +413,7 @@ func runWrite(st *sessionState, path, content string) string {
 		return "Error: " + err.Error()
 	}
 
-	// 写后刷新读取状态：刚写入的内容即本会话的最新认知，允许连续 Write，
-	// 也让后续 Read 的 mtime 去重正确命中。区间计算与 runRead 保持一致。
-	if st != nil {
-		if fi, err := os.Stat(abs); err == nil {
-			start, end := 0, 0
-			if trimmed := strings.TrimRight(content, "\n"); trimmed != "" {
-				start, end = 1, len(strings.Split(trimmed, "\n"))
-			}
-			st.reads[abs] = readState{mtime: fi.ModTime(), start: start, end: end, fullView: true}
-		}
-	}
+	st.markWritten(abs, content)
 	return fmt.Sprintf("Wrote %d bytes to %s", len(content), path)
 }
 
@@ -431,11 +451,24 @@ func atomicWriteFile(abs string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-func runEdit(path, oldText, newText string) string {
+// runEdit 对文件做精确子串替换，对齐 Claude Code Edit 的语义：
+// old_text 必须与文件内容精确匹配（含缩进与空白），且在文件中唯一（恰好 1 处）——
+// 0 处或多处均失败，失败文案本身携带恢复指引（扩上下文 / replace_all=true），
+// 让模型在同一轮次内自我纠正；replace_all=true 显式声明替换全部匹配（重命名场景）。
+// 与 Write 共用 read-before 门控：编辑前本会话必须全量读过该文件且读后未被外部改动，
+// 落盘走原子写并保留原权限位。
+func runEdit(st *sessionState, path, oldText, newText string, all bool) string {
 	if oldText == "" {
 		return "Error: old_text must not be empty"
 	}
+	if newText == oldText {
+		return "Error: new_text must be different from old_text"
+	}
 	abs, err := safePath(path)
+	if err != nil {
+		return "Error: " + err.Error()
+	}
+	perm, err := checkWritable(st, abs, path)
 	if err != nil {
 		return "Error: " + err.Error()
 	}
@@ -443,61 +476,32 @@ func runEdit(path, oldText, newText string) string {
 	if err != nil {
 		return "Error: " + err.Error()
 	}
-	text := string(data)
-	if !strings.Contains(text, oldText) {
-		return fmt.Sprintf("Error: text not found in %s", path)
+	content := string(data)
+	count := strings.Count(content, oldText)
+	switch {
+	case count == 0:
+		return fmt.Sprintf("Error: text not found in %s — the file may have been modified since it was read; read it again", path)
+	case count > 1 && !all:
+		return fmt.Sprintf("Error: old_text is not unique in %s (%d matches). Add surrounding context to make it unique, or set replace_all=true to replace every occurrence", path, count)
 	}
-	if err := os.WriteFile(abs, []byte(strings.Replace(text, oldText, newText, 1)), 0o644); err != nil {
+	if all {
+		content = strings.ReplaceAll(content, oldText, newText)
+	} else {
+		content = strings.Replace(content, oldText, newText, 1)
+	}
+	if err := atomicWriteFile(abs, []byte(content), perm); err != nil {
 		return "Error: " + err.Error()
 	}
+	st.markWritten(abs, content)
 	return fmt.Sprintf("Edited %s", path)
 }
 
-func runGlob(pattern string) string {
-	if pattern == "" {
-		return "Error: pattern is required"
-	}
-	var matches []string
-	err := filepath.WalkDir(workdir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // 跳过无权限等读不了的路径
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, relErr := filepath.Rel(workdir, p)
-		if relErr != nil {
-			return nil
-		}
-		if matchGlob(pattern, filepath.ToSlash(rel)) {
-			matches = append(matches, filepath.ToSlash(rel))
-		}
-		return nil
-	})
-	if err != nil {
-		return "Error: " + err.Error()
-	}
-	sort.Strings(matches)
-	shown := matches
-	if len(shown) > maxListResults {
-		shown = append(shown[:maxListResults], "... (more matches omitted; narrow the pattern)")
-	}
-	if len(shown) == 0 {
-		return "(no matches)"
-	}
-	return strings.Join(shown, "\n")
-}
+// searchEng 是进程级搜索引擎实例（searchEngine 接口的具体实现）。
+var searchEng searchEngine = newSearchEngine()
 
-func runGrep(pattern, path, include string) string {
+func runGlob(pattern string, path string) string {
 	if pattern == "" {
 		return "Error: pattern is required"
-	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return "Error: invalid regex: " + err.Error()
 	}
 	root := workdir
 	if path != "" {
@@ -507,68 +511,115 @@ func runGrep(pattern, path, include string) string {
 		}
 		root = abs
 	}
-	info, err := os.Stat(root)
+
+	matches, err := searchEng.Glob(pattern, root)
 	if err != nil {
 		return "Error: " + err.Error()
 	}
 
-	var out []string
-	appendMatch := func(rel string, lineNo int, line string) bool {
-		out = append(out, fmt.Sprintf("%s:%d:%s", rel, lineNo, strings.TrimRight(line, "\r")))
-		return len(out) >= maxListResults
+	// 限制结果条数
+	shown := matches
+	if len(shown) > maxListResults {
+		shown = append(shown[:maxListResults],
+			fmt.Sprintf("... (more matches omitted; %d total, narrow the pattern)", len(matches)))
 	}
-
-	scan := func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		if fi, err := d.Info(); err != nil || fi.Size() > maxGrepFileSize {
-			return nil
-		}
-		rel, relErr := filepath.Rel(workdir, p)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if include != "" && !matchGlob(include, filepath.Base(rel)) && !matchGlob(include, rel) {
-			return nil
-		}
-		data, err := os.ReadFile(p)
-		if err != nil || !utf8.Valid(data) {
-			return nil // 跳过读不了或二进制文件
-		}
-		for i, line := range strings.Split(string(data), "\n") {
-			if re.MatchString(line) && appendMatch(rel, i+1, line) {
-				out = append(out, "... (more matches omitted)")
-				return filepath.SkipAll
-			}
-		}
-		return nil
-	}
-
-	// root 是单个文件时 WalkDir 也会正确调用一次 scan
-	if info.IsDir() {
-		if err := filepath.WalkDir(root, scan); err != nil {
-			return "Error: " + err.Error()
-		}
-	} else {
-		if err := scan(root, fs.FileInfoToDirEntry(info), nil); err != nil {
-			return "Error: " + err.Error()
-		}
-	}
-	if len(out) == 0 {
+	if len(shown) == 0 {
 		return "(no matches)"
 	}
-	return strings.Join(out, "\n")
+	return strings.Join(shown, "\n")
+}
+
+// runGrepParams 是 grep 的完整入参集（handler 解 JSON 用）。
+type runGrepParams struct {
+	Pattern    string `json:"pattern"`
+	Path       string `json:"path"`
+	Glob       string `json:"glob"`        // 替代旧的 include
+	OutputMode string `json:"output_mode"` // content | files_with_matches | count
+	HeadLimit  int    `json:"head_limit"`
+	Offset     int    `json:"offset"`
+	IgnoreCase bool   `json:"ignore_case"`
+}
+
+func runGrep(params runGrepParams) string {
+	if params.Pattern == "" {
+		return "Error: pattern is required"
+	}
+	if params.OutputMode == "" {
+		params.OutputMode = "files_with_matches" // 默认：先定位文件
+	}
+	if params.HeadLimit == 0 {
+		params.HeadLimit = maxListResults // 默认上限
+	}
+
+	// root 始终是 workdir（用于相对路径计算），path 单独作为搜索目标
+	// 如果 path 非空，它可以是文件或子目录
+	if params.Path != "" {
+		if _, err := safePath(params.Path); err != nil {
+			return "Error: " + err.Error()
+		}
+	}
+
+	var globs []string
+	if params.Glob != "" {
+		globs = append(globs, params.Glob)
+	}
+
+	req := grepRequest{
+		Pattern:     params.Pattern,
+		Root:        workdir, // 始终用 workdir 做 rel 计算基准
+		Path:        params.Path,
+		Globs:       globs,
+		OutputMode:  params.OutputMode,
+		HeadLimit:   params.HeadLimit,
+		Offset:      params.Offset,
+		IgnoreCase:  params.IgnoreCase,
+		LineNumbers: true,
+	}
+
+	result, err := searchEng.Grep(req)
+	if err != nil {
+		// ripgrep 解析失败可能是非法正则，包装成可读错误
+		if strings.Contains(err.Error(), "ripgrep") {
+			return "Error: " + strings.Replace(err.Error(), "ripgrep: ", "", 1)
+		}
+		return "Error: " + err.Error()
+	}
+
+	var lines []string
+	switch params.OutputMode {
+	case "files_with_matches":
+		lines = result.Files
+	case "count":
+		keys := make([]string, 0, len(result.Counts))
+		for k := range result.Counts {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			lines = append(lines, fmt.Sprintf("%s:%d", k, result.Counts[k]))
+		}
+	case "content":
+		// 按文件路径 + 行号排序（rg 不保证字典序）
+		sort.Slice(result.Matches, func(i, j int) bool {
+			if result.Matches[i].File != result.Matches[j].File {
+				return result.Matches[i].File < result.Matches[j].File
+			}
+			return result.Matches[i].Line < result.Matches[j].Line
+		})
+		for _, m := range result.Matches {
+			lines = append(lines, fmt.Sprintf("%s:%d:%s", m.File, m.Line, m.Text))
+		}
+	}
+
+	if result.Truncated {
+		trunc := fmt.Sprintf("... (more matches omitted; use a more specific pattern or raise head_limit)")
+		lines = append(lines, trunc)
+	}
+
+	if len(lines) == 0 {
+		return "(no matches)"
+	}
+	return strings.Join(lines, "\n")
 }
 
 // matchGlob 支持跨目录的 **（Go 标准库 filepath.Glob 不支持 **）。
@@ -646,21 +697,42 @@ func allTools() []anthropic.ToolUnionParam {
 				"content": map[string]string{"type": "string"},
 			},
 			[]string{"path", "content"}),
-		tool("edit_file", "Replace text in a file once (first occurrence).",
+		tool("edit_file",
+			"Performs exact string replacement in a file. old_text must match the file content exactly, "+
+				"including indentation and whitespace. The edit FAILS unless old_text occurs exactly once in "+
+				"the file: provide a larger string with more surrounding context to make it unique, or set "+
+				"replace_all=true to change every occurrence (useful for renaming a variable, for instance). "+
+				"The file must have been fully read with read_file earlier in the conversation and must not "+
+				"have changed since that read, otherwise the edit is refused and you must read it again.",
 			map[string]any{
-				"path":     map[string]string{"type": "string"},
-				"old_text": map[string]string{"type": "string"},
-				"new_text": map[string]string{"type": "string"},
+				"path":        map[string]string{"type": "string"},
+				"old_text":    map[string]string{"type": "string"},
+				"new_text":    map[string]string{"type": "string", "description": "The text to replace it with (must be different from old_text)"},
+				"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences of old_text (default false)"},
 			},
 			[]string{"path", "old_text", "new_text"}),
-		tool("glob", "Find files by pattern relative to the workspace (supports **).",
-			map[string]any{"pattern": map[string]string{"type": "string"}},
-			[]string{"pattern"}),
-		tool("grep", "Search file contents with a regex. Optional path to search in, optional glob filter for filenames.",
+		tool("glob",
+			"Find files by pattern. Respects .gitignore. "+
+				"Supports ** for recursive matching. Results are relative to the search root.",
 			map[string]any{
-				"pattern": map[string]string{"type": "string"},
-				"path":    map[string]string{"type": "string"},
-				"include": map[string]string{"type": "string"},
+				"pattern": map[string]string{"type": "string", "description": "Glob pattern (e.g. '**/*.go', 'src/*.tsx')"},
+				"path":    map[string]string{"type": "string", "description": "Directory to search in (default: workspace root)"},
+			},
+			[]string{"pattern"}),
+		tool("grep",
+			"Search file contents with a regex. Respects .gitignore. "+
+				"Three output modes: files_with_matches (default, fast — just lists files), "+
+				"content (shows matching lines with numbers), count (files:hit count). "+
+				"Use glob to filter filenames, e.g. glob='*.py' or glob='**/*.go'. "+
+				"Use head_limit/offset to page through large result sets.",
+			map[string]any{
+				"pattern":     map[string]string{"type": "string", "description": "Regex pattern to search for"},
+				"path":        map[string]string{"type": "string", "description": "Directory or file to search in (default: workspace root)"},
+				"glob":        map[string]string{"type": "string", "description": "Glob filter for filenames (e.g. '*.ts', '**/*.go')"},
+				"output_mode": map[string]any{"type": "string", "enum": []string{"files_with_matches", "content", "count"}, "description": "files_with_matches (default): list files that match — fastest. content: show matching lines with numbers. count: show file:hit_count."},
+				"head_limit":  map[string]string{"type": "integer", "description": "Max results to return (default 200)"},
+				"offset":      map[string]string{"type": "integer", "description": "Skip first N results (for pagination)"},
+				"ignore_case": map[string]string{"type": "boolean", "description": "Case-insensitive matching (default false)"},
 			},
 			[]string{"pattern"}),
 		tool("todo_write",

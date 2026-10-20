@@ -142,19 +142,118 @@ func TestRunEdit(t *testing.T) {
 	dir := setupWorkdir(t)
 	mustWrite(t, dir, "code.py", "print('a')\nprint('a')\n")
 
-	t.Run("replaces first occurrence only", func(t *testing.T) {
-		if got := runEdit("code.py", "print('a')", "print('b')"); got != "Edited code.py" {
+	// 破坏性变更：旧实现静默替换第一处，对齐 CC 后多处匹配默认失败。
+	t.Run("two identical matches fail by default and file is unchanged", func(t *testing.T) {
+		st := newSessionState()
+		runRead(st, "code.py", 0, nil)
+		got := runEdit(st, "code.py", "print('a')", "print('b')", false)
+		if !strings.Contains(got, "not unique") || !strings.Contains(got, "2 matches") {
 			t.Fatalf("got %q", got)
 		}
 		data, _ := os.ReadFile(filepath.Join(dir, "code.py"))
-		if string(data) != "print('b')\nprint('a')\n" {
+		if string(data) != "print('a')\nprint('a')\n" {
+			t.Fatalf("file was modified: %q", data)
+		}
+	})
+
+	t.Run("unique match succeeds", func(t *testing.T) {
+		st := newSessionState()
+		mustWrite(t, dir, "unique.py", "print('a')\nprint('c')\n")
+		runRead(st, "unique.py", 0, nil)
+		if got := runEdit(st, "unique.py", "print('a')", "print('b')", false); got != "Edited unique.py" {
+			t.Fatalf("got %q", got)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "unique.py"))
+		if string(data) != "print('b')\nprint('c')\n" {
 			t.Fatalf("file content: %q", data)
 		}
 	})
 
-	t.Run("text not found", func(t *testing.T) {
-		if got := runEdit("code.py", "no-such-text", "x"); got != "Error: text not found in code.py" {
+	t.Run("replace_all replaces every occurrence", func(t *testing.T) {
+		st := newSessionState()
+		runRead(st, "code.py", 0, nil)
+		if got := runEdit(st, "code.py", "print('a')", "print('b')", true); got != "Edited code.py" {
 			t.Fatalf("got %q", got)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "code.py"))
+		if string(data) != "print('b')\nprint('b')\n" {
+			t.Fatalf("file content: %q", data)
+		}
+	})
+
+	t.Run("text not found suggests re-reading", func(t *testing.T) {
+		st := newSessionState()
+		runRead(st, "code.py", 0, nil)
+		got := runEdit(st, "code.py", "no-such-text", "x", false)
+		if !strings.Contains(got, "text not found in code.py") || !strings.Contains(got, "read it again") {
+			t.Fatalf("got %q", got)
+		}
+	})
+}
+
+// TestRunEditGate 覆盖 read-before-edit 门控（与 Write 共用 checkWritable）：
+// 未读拒绝、部分读拒绝、读后过期拒绝、编辑后状态刷新允许连续编辑。
+func TestRunEditGate(t *testing.T) {
+	dir := setupWorkdir(t)
+
+	t.Run("editing unread file is refused and file unchanged", func(t *testing.T) {
+		mustWrite(t, dir, "unread.txt", "original")
+		got := runEdit(newSessionState(), "unread.txt", "original", "evil", false)
+		if !strings.Contains(got, "has not been read yet") {
+			t.Fatalf("got %q", got)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "unread.txt"))
+		if string(data) != "original" {
+			t.Fatalf("file was modified: %q", data)
+		}
+	})
+
+	t.Run("partial read does not grant edit access", func(t *testing.T) {
+		st := newSessionState()
+		mustWrite(t, dir, "p.txt", "l1\nl2\nl3\n")
+		got := runRead(st, "p.txt", 2, nil) // 只读第 2 行起，非全量
+		if strings.HasPrefix(got, "Error:") {
+			t.Fatalf("read: %q", got)
+		}
+		if got := runEdit(st, "p.txt", "l2", "x", false); !strings.Contains(got, "has not been read yet") {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("stale read (file modified since) is refused", func(t *testing.T) {
+		st := newSessionState()
+		abs := mustWrite(t, dir, "stale.txt", "v1\n")
+		runRead(st, "stale.txt", 0, nil)
+		// 模拟外部改动：内容 + mtime 一起变
+		mustWrite(t, dir, "stale.txt", "v1 changed\n")
+		future := time.Now().Add(time.Hour)
+		if err := os.Chtimes(abs, future, future); err != nil {
+			t.Fatal(err)
+		}
+		got := runEdit(st, "stale.txt", "v1", "v2", false)
+		if !strings.Contains(got, "has been modified since read") {
+			t.Fatalf("got %q", got)
+		}
+		data, _ := os.ReadFile(abs)
+		if string(data) != "v1 changed\n" {
+			t.Fatalf("file was modified: %q", data)
+		}
+	})
+
+	t.Run("successful edit refreshes read state for consecutive edits", func(t *testing.T) {
+		st := newSessionState()
+		mustWrite(t, dir, "chain.txt", "a\nb\nc\n")
+		runRead(st, "chain.txt", 0, nil)
+		if got := runEdit(st, "chain.txt", "a", "A", false); strings.HasPrefix(got, "Error:") {
+			t.Fatalf("first edit: %q", got)
+		}
+		// 不再 Read，直接第二次编辑也应成功（编辑后状态已刷新）
+		if got := runEdit(st, "chain.txt", "c", "C", false); strings.HasPrefix(got, "Error:") {
+			t.Fatalf("second edit: %q", got)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, "chain.txt"))
+		if string(data) != "A\nb\nC\n" {
+			t.Fatalf("file content: %q", data)
 		}
 	})
 }
@@ -167,13 +266,13 @@ func TestRunGlob(t *testing.T) {
 	mustWrite(t, dir, "sub/notes.txt", "")
 
 	t.Run("star matches one level", func(t *testing.T) {
-		if got := runGlob("*.py"); got != "a.py" {
+		if got := runGlob("*.py", ""); got != "a.py" {
 			t.Fatalf("got %q", got)
 		}
 	})
 
 	t.Run("doublestar matches recursively", func(t *testing.T) {
-		got := strings.Split(runGlob("**/*.py"), "\n")
+		got := strings.Split(runGlob("**/*.py", ""), "\n")
 		want := []string{"a.py", "sub/b.py", "sub/deep/c.py"}
 		if len(got) != len(want) {
 			t.Fatalf("got %v, want %v", got, want)
@@ -186,13 +285,13 @@ func TestRunGlob(t *testing.T) {
 	})
 
 	t.Run("no matches", func(t *testing.T) {
-		if got := runGlob("*.zzz"); got != "(no matches)" {
+		if got := runGlob("*.zzz", ""); got != "(no matches)" {
 			t.Fatalf("got %q", got)
 		}
 	})
 
 	t.Run("empty pattern", func(t *testing.T) {
-		if got := runGlob(""); !strings.HasPrefix(got, "Error:") {
+		if got := runGlob("", ""); !strings.HasPrefix(got, "Error:") {
 			t.Fatalf("got %q", got)
 		}
 	})
@@ -205,7 +304,7 @@ func TestRunGrep(t *testing.T) {
 	mustWrite(t, dir, "c.md", "nothing here\n")
 
 	t.Run("regex search with file:line:format", func(t *testing.T) {
-		got := strings.Split(runGrep("foo", "", ""), "\n")
+		got := strings.Split(runGrep(runGrepParams{Pattern: "foo", OutputMode: "content"}), "\n")
 		want := []string{"a.txt:1:foo", "a.txt:2:bar foo", "sub/b.log:1:foo here"}
 		if len(got) != len(want) {
 			t.Fatalf("got %v, want %v", got, want)
@@ -217,29 +316,53 @@ func TestRunGrep(t *testing.T) {
 		}
 	})
 
-	t.Run("include filters filenames", func(t *testing.T) {
-		got := runGrep("foo", "", "*.log")
+	t.Run("glob filters filenames", func(t *testing.T) {
+		got := runGrep(runGrepParams{Pattern: "foo", Glob: "*.log", OutputMode: "content"})
 		if got != "sub/b.log:1:foo here" {
 			t.Fatalf("got %q", got)
 		}
 	})
 
 	t.Run("path narrows search to a file", func(t *testing.T) {
-		got := runGrep("bar", "a.txt", "")
+		got := runGrep(runGrepParams{Pattern: "bar", Path: "a.txt", OutputMode: "content"})
 		if got != "a.txt:2:bar foo" {
 			t.Fatalf("got %q", got)
 		}
 	})
 
 	t.Run("no matches", func(t *testing.T) {
-		if got := runGrep("zzz-not-there", "", ""); got != "(no matches)" {
+		if got := runGrep(runGrepParams{Pattern: "zzz-not-there"}); got != "(no matches)" {
 			t.Fatalf("got %q", got)
 		}
 	})
 
 	t.Run("invalid regex", func(t *testing.T) {
-		if got := runGrep("[unclosed", "", ""); !strings.HasPrefix(got, "Error:") {
+		if got := runGrep(runGrepParams{Pattern: "[unclosed"}); !strings.HasPrefix(got, "Error:") {
 			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("files_with_matches default mode lists files", func(t *testing.T) {
+		got := runGrep(runGrepParams{Pattern: "foo"}) // 默认 files_with_matches
+		lines := strings.Split(got, "\n")
+		want := []string{"a.txt", "sub/b.log"}
+		if len(lines) != len(want) {
+			t.Fatalf("got %v, want %v", lines, want)
+		}
+		for i := range want {
+			if lines[i] != want[i] {
+				t.Fatalf("got %v, want %v", lines, want)
+			}
+		}
+	})
+
+	t.Run("count mode shows file:hit_count", func(t *testing.T) {
+		got := runGrep(runGrepParams{Pattern: "foo", OutputMode: "count"})
+		if !strings.Contains(got, "a.txt:2") {
+			t.Fatalf("expected a.txt:2 in count output, got %q", got)
+		}
+		if !strings.Contains(got, "sub/b.log:1") {
+			t.Fatalf("expected sub/b.log:1 in count output, got %q", got)
 		}
 	})
 }
@@ -307,6 +430,7 @@ func TestToolHandlersDispatch(t *testing.T) {
 	dir := setupWorkdir(t)
 	mustWrite(t, dir, "hello.txt", "hello")
 	mustWrite(t, dir, "code.txt", "aaa")
+	mustWrite(t, dir, "dup.txt", "xx\nxx\n")
 
 	cases := []struct {
 		name      string
@@ -319,8 +443,9 @@ func TestToolHandlersDispatch(t *testing.T) {
 		{name: "read_file string number limit", tool: "read_file", args: `{"path":"hello.txt","limit":"1"}`, wantSub: "1→hello"},
 		{name: "write_file valid", tool: "write_file", args: `{"path":"out.txt","content":"data"}`, wantSub: "Wrote 4 bytes to out.txt"},
 		{name: "edit_file valid", tool: "edit_file", args: `{"path":"code.txt","old_text":"aaa","new_text":"bbb"}`, wantSub: "Edited code.txt"},
+		{name: "edit_file replace_all", tool: "edit_file", args: `{"path":"dup.txt","old_text":"xx","new_text":"yy","replace_all":true}`, wantSub: "Edited dup.txt"},
 		{name: "glob valid", tool: "glob", args: `{"pattern":"*.txt"}`, wantSub: "hello.txt"},
-		{name: "grep valid", tool: "grep", args: `{"pattern":"hello"}`, wantSub: "hello.txt:1:hello"},
+		{name: "grep valid", tool: "grep", args: `{"pattern":"hello","output_mode":"content"}`, wantSub: "hello.txt:1:hello"},
 		{name: "read_file invalid json", tool: "read_file", args: `{bad`, wantError: true},
 		{name: "write_file invalid json", tool: "write_file", args: `{bad`, wantError: true},
 		{name: "edit_file invalid json", tool: "edit_file", args: `{bad`, wantError: true},
@@ -329,7 +454,13 @@ func TestToolHandlersDispatch(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := runTool(newSessionState(), tc.tool, json.RawMessage(tc.args))
+			st := newSessionState()
+			// read-before-edit 门控：edit_file 有效用例需先在同一会话内全量读取目标文件
+			if tc.tool == "edit_file" && !tc.wantError {
+				runRead(st, "code.txt", 0, nil)
+				runRead(st, "dup.txt", 0, nil)
+			}
+			got := runTool(st, tc.tool, json.RawMessage(tc.args))
 			if tc.wantError {
 				if !strings.HasPrefix(got, "Error:") {
 					t.Fatalf("got %q, want Error: prefix", got)
@@ -342,10 +473,14 @@ func TestToolHandlersDispatch(t *testing.T) {
 		})
 	}
 
-	// edit_file 落盘结果也要验证（handler 确实改了文件）
+	// edit_file 落盘结果也要验证（handler 确实改了文件；replace_all 全部替换）
 	data, err := os.ReadFile(filepath.Join(dir, "code.txt"))
 	if err != nil || string(data) != "bbb" {
 		t.Fatalf("after edit dispatch: %q, err %v", data, err)
+	}
+	data, err = os.ReadFile(filepath.Join(dir, "dup.txt"))
+	if err != nil || string(data) != "yy\nyy\n" {
+		t.Fatalf("after replace_all dispatch: %q, err %v", data, err)
 	}
 }
 
@@ -477,31 +612,39 @@ func TestRunWriteGate(t *testing.T) {
 	})
 }
 
-// TestRunEditEdgeCases 覆盖空 old_text、文件不存在、路径逃逸、多行替换。
+// TestRunEditEdgeCases 覆盖空 old_text、old==new、文件不存在、路径逃逸、多行替换。
 func TestRunEditEdgeCases(t *testing.T) {
 	dir := setupWorkdir(t)
 	mustWrite(t, dir, "multi.txt", "line1\nline2\n")
 
 	t.Run("empty old_text is rejected", func(t *testing.T) {
-		if got := runEdit("multi.txt", "", "x"); got != "Error: old_text must not be empty" {
+		if got := runEdit(newSessionState(), "multi.txt", "", "x", false); got != "Error: old_text must not be empty" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("old_text equal to new_text is rejected", func(t *testing.T) {
+		if got := runEdit(newSessionState(), "multi.txt", "line1", "line1", false); got != "Error: new_text must be different from old_text" {
 			t.Fatalf("got %q", got)
 		}
 	})
 
 	t.Run("missing file", func(t *testing.T) {
-		if got := runEdit("nope.txt", "a", "b"); !strings.HasPrefix(got, "Error:") {
+		if got := runEdit(newSessionState(), "nope.txt", "a", "b", false); !strings.HasPrefix(got, "Error:") {
 			t.Fatalf("got %q", got)
 		}
 	})
 
 	t.Run("path escaping workdir is denied", func(t *testing.T) {
-		if got := runEdit("../main.go", "a", "b"); !strings.HasPrefix(got, "Error:") {
+		if got := runEdit(newSessionState(), "../main.go", "a", "b", false); !strings.HasPrefix(got, "Error:") {
 			t.Fatalf("got %q", got)
 		}
 	})
 
 	t.Run("multiline replacement", func(t *testing.T) {
-		got := runEdit("multi.txt", "line1\nline2", "a\n\nb")
+		st := newSessionState()
+		runRead(st, "multi.txt", 0, nil)
+		got := runEdit(st, "multi.txt", "line1\nline2", "a\n\nb", false)
 		if got != "Edited multi.txt" {
 			t.Fatalf("got %q", got)
 		}
@@ -834,7 +977,7 @@ func TestRunGlobSkipsGit(t *testing.T) {
 	mustWrite(t, dir, ".git/config", "[core]\n")
 	mustWrite(t, dir, "app.go", "")
 
-	got := runGlob("**/*")
+	got := runGlob("**/*", "")
 	if strings.Contains(got, ".git/config") {
 		t.Fatalf(".git contents should be skipped, got:\n%s", got)
 	}
@@ -850,12 +993,12 @@ func TestRunGlobTruncation(t *testing.T) {
 		mustWrite(t, dir, fmt.Sprintf("many/f%03d.txt", i), "")
 	}
 
-	got := runGlob("many/*.txt")
+	got := runGlob("many/*.txt", "")
 	lines := strings.Split(got, "\n")
 	if len(lines) != maxListResults+1 {
 		t.Fatalf("got %d output lines, want %d (matches + marker)", len(lines), maxListResults+1)
 	}
-	if lines[len(lines)-1] != "... (more matches omitted; narrow the pattern)" {
+	if !strings.Contains(lines[len(lines)-1], "more matches omitted") {
 		t.Fatalf("last line = %q, want truncation marker", lines[len(lines)-1])
 	}
 	if strings.Contains(got, fmt.Sprintf("many/f%03d.txt", maxListResults)) {
@@ -869,7 +1012,7 @@ func TestRunGrepDirectoryPath(t *testing.T) {
 	mustWrite(t, dir, "a.txt", "foo\n")
 	mustWrite(t, dir, "sub/b.txt", "foo in sub\n")
 
-	got := runGrep("foo", "sub", "")
+	got := runGrep(runGrepParams{Pattern: "foo", Path: "sub", OutputMode: "content"})
 	if !strings.Contains(got, "sub/b.txt:1:foo in sub") {
 		t.Fatalf("got %q", got)
 	}
@@ -889,7 +1032,7 @@ func TestRunGrepSkipsBinaryAndOversize(t *testing.T) {
 	mustWrite(t, dir, "big.txt", strings.Repeat("foo\n", (maxGrepFileSize/4)+10))
 	mustWrite(t, dir, "small.txt", "foo here\n")
 
-	got := runGrep("foo", "", "")
+	got := runGrep(runGrepParams{Pattern: "foo", OutputMode: "content"})
 	if strings.Contains(got, "bin.dat") || strings.Contains(got, "big.txt") {
 		t.Fatalf("binary/oversize files should be skipped, got:\n%s", got)
 	}
@@ -907,12 +1050,12 @@ func TestRunGrepTruncation(t *testing.T) {
 	}
 	mustWrite(t, dir, "many.txt", b.String())
 
-	got := runGrep("foo", "", "")
+	got := runGrep(runGrepParams{Pattern: "foo", OutputMode: "content"})
 	lines := strings.Split(got, "\n")
 	if len(lines) != maxListResults+1 {
 		t.Fatalf("got %d output lines, want %d (matches + marker)", len(lines), maxListResults+1)
 	}
-	if lines[len(lines)-1] != "... (more matches omitted)" {
+	if !strings.Contains(lines[len(lines)-1], "more matches omitted") {
 		t.Fatalf("last line = %q, want truncation marker", lines[len(lines)-1])
 	}
 }
@@ -920,7 +1063,75 @@ func TestRunGrepTruncation(t *testing.T) {
 // TestRunGrepPathEscape 验证 grep 的 path 参数同样受 safePath 约束。
 func TestRunGrepPathEscape(t *testing.T) {
 	setupWorkdir(t)
-	if got := runGrep("foo", "../outside", ""); !strings.HasPrefix(got, "Error:") {
+	if got := runGrep(runGrepParams{Pattern: "foo", Path: "../outside"}); !strings.HasPrefix(got, "Error:") {
 		t.Fatalf("got %q, want Error: prefix", got)
+	}
+}
+
+// TestGitignoreRespected 验证根目录 .gitignore 的规则被 glob 和 grep 同时尊重。
+func TestGitignoreRespected(t *testing.T) {
+	dir := setupWorkdir(t)
+	// 根目录 .gitignore 排除 *.log
+	mustWrite(t, dir, ".gitignore", "*.log\n")
+	// 创建 .gitignore 规则范围内外的文件
+	mustWrite(t, dir, "app.go", "hello from app\n")
+	mustWrite(t, dir, "debug.log", "hello from log\n") // 被忽略
+	mustWrite(t, dir, "notes.txt", "hello too\n")
+
+	// glob：应排除 *.log
+	got := runGlob("*.*", "")
+	if strings.Contains(got, "debug.log") {
+		t.Fatalf("debug.log should be gitignored, got:\n%s", got)
+	}
+	if !strings.Contains(got, "app.go") || !strings.Contains(got, "notes.txt") {
+		t.Fatalf("non-ignored files missing, got:\n%s", got)
+	}
+
+	// grep：应排除 debug.log 里的匹配
+	grepOut := runGrep(runGrepParams{Pattern: "hello", OutputMode: "content"})
+	if strings.Contains(grepOut, "debug.log") {
+		t.Fatalf("debug.log should be gitignored from grep, got:\n%s", grepOut)
+	}
+	if !strings.Contains(grepOut, "app.go:1:hello from app") {
+		t.Fatalf("expected app.go match, got:\n%s", grepOut)
+	}
+}
+
+// TestNestedGitignore 验证子目录 .gitignore 被 walkerEngine 加载。
+func TestNestedGitignore(t *testing.T) {
+	dir := setupWorkdir(t)
+	mustWrite(t, dir, "root.go", "hello\n")
+	mustWrite(t, dir, "pkg/internal/build.go", "hello internal\n")
+	// pkg/internal/.gitignore 排除 build.go
+	mustWrite(t, dir, "pkg/internal/.gitignore", "build.go\n")
+
+	// glob 不应返回 build.go
+	got := runGlob("**/*.go", "")
+	if strings.Contains(got, "pkg/internal/build.go") {
+		t.Fatalf("pkg/internal/build.go should be ignored by nested .gitignore, got:\n%s", got)
+	}
+	if !strings.Contains(got, "root.go") {
+		t.Fatalf("root.go missing, got:\n%s", got)
+	}
+}
+
+// TestRunGlobWithPath 验证 glob 新增的 path 参数。
+func TestRunGlobWithPath(t *testing.T) {
+	dir := setupWorkdir(t)
+	mustWrite(t, dir, "top.py", "")
+	mustWrite(t, dir, "sub/deep/bottom.py", "")
+	mustWrite(t, dir, "sub/mid.py", "")
+
+	// 不指定 path：搜到全部（相对于 workdir）
+	all := runGlob("**/*.py", "")
+	if !strings.Contains(all, "top.py") || !strings.Contains(all, "sub/mid.py") || !strings.Contains(all, "sub/deep/bottom.py") {
+		t.Fatalf("path='': expected all 3 .py files, got:\n%s", all)
+	}
+
+	// 指定 path="sub"：搜到 sub 目录下的（相对于 sub 的路径）
+	sub := runGlob("**/*.py", "sub")
+	// 返回的是相对于 sub 的路径：mid.py 和 deep/bottom.py
+	if !strings.Contains(sub, "mid.py") || !strings.Contains(sub, "deep/bottom.py") {
+		t.Fatalf("path='sub' missing subdir files, got:\n%s", sub)
 	}
 }

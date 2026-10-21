@@ -58,7 +58,11 @@ func main() {
 			break
 		}
 		query := scanner.Text()
-		if q := strings.ToLower(strings.TrimSpace(query)); q == "q" || q == "exit" || q == "" {
+		q := strings.ToLower(strings.TrimSpace(query))
+		if q == "" {
+			continue // 空输入仅重新提示，不退出
+		}
+		if q == "q" || q == "exit" {
 			break
 		}
 

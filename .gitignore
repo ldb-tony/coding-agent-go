@@ -14,3 +14,9 @@ coding-agent-go
 
 # s10 任务系统产物（.tasks/ 下的任务记录属于工作区运行时状态）
 .tasks/
+
+# 隐藏文件/目录默认全部忽略；已跟踪文件不受影响，以下为显式保留的例外
+.*
+!.gitignore
+!.env.example
+!.trae/

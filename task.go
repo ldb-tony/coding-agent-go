@@ -26,10 +26,11 @@ const subSystemPrompt = "You are a subagent working on a single delegated task. 
 	"Use the provided tools to complete it, then reply with a concise final summary " +
 	"of what you found or did. Act, don't explain."
 
-// subTools 返回子代理可用的工具：与父相同的基础工具，但不含 task（只允许一层委派）。
+// subTools 返回子代理可用的工具：与父相同的工具池，但不含 task（只允许一层委派）。
 // 对齐参考实现的 SUB_TOOLS = BASE_TOOLS（去掉 task）。
-func subTools() []anthropic.ToolUnionParam {
-	all := allTools()
+// s14: 每轮重算，子代理 connect_mcp 后下一轮也能看到新 MCP 工具（与父 loop 行为一致）。
+func subTools(st *sessionState) []anthropic.ToolUnionParam {
+	all := assembleToolPool(st)
 	out := make([]anthropic.ToolUnionParam, 0, len(all))
 	for _, t := range all {
 		if t.OfTool != nil && t.OfTool.Name == taskToolName {
@@ -47,9 +48,9 @@ func runSubagent(st *sessionState, prompt string) string {
 	messages := []anthropic.MessageParam{
 		anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 	}
-	tools := subTools()
 
 	for turn := 0; turn < subagentMaxTurns; turn++ {
+		tools := subTools(st)
 		resp, err := st.client.Send(st.ctx, subSystemPrompt, messages, tools, subagentMaxTokens)
 		if err != nil {
 			return "Error: subagent failed: " + err.Error()

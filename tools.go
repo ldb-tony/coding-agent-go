@@ -86,6 +86,7 @@ type sessionState struct {
 	client           LLMClient            // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
 	ctx              context.Context      // s06: 子代理继承父 loop 的 context（超时/取消）
 	shellCwd         string               // s12: bash cwd 持久化（跨调用保持工作目录）
+	mcp              *mcpRegistry         // s14: 已连接 MCP 服务注册表（首次 connect_mcp 时初始化）
 }
 
 func newSessionState() *sessionState {
@@ -139,6 +140,8 @@ var toolHandlers = map[string]toolHandler{
 	"complete_task": completeTaskHandler,
 	"get_task":      getTaskHandler,
 	"list_tasks":    listTaskHandler,
+	// s14: MCP 外部工具连接
+	"connect_mcp": connectMCPHandler,
 }
 
 // task 的处理器在 init 里注册：taskHandler 经 runSubagent 复用 runTool，而 runTool
@@ -150,10 +153,25 @@ func init() {
 
 func runTool(st *sessionState, name string, input json.RawMessage) string {
 	handler, ok := toolHandlers[name]
-	if !ok {
-		return fmt.Sprintf("Error: unknown tool %q", name)
+	if ok {
+		return handler(st, input)
 	}
-	return handler(st, input)
+	// s14: MCP 外部工具 fallback —— connect_mcp 注册的动态工具不在静态 map 里
+	if isMCPTool(name) {
+		if st.mcp == nil {
+			return "MCP error: no MCP servers connected — call connect_mcp first"
+		}
+		server, safeTool, ok := parseMCPName(name)
+		if !ok {
+			return fmt.Sprintf("MCP error: malformed tool name %q (expected mcp__{server}__{tool})", name)
+		}
+		client, exists := st.mcp.clients[server]
+		if !exists {
+			return fmt.Sprintf("MCP error: server %q not connected", server)
+		}
+		return client.callTool(safeTool, input)
+	}
+	return fmt.Sprintf("Error: unknown tool %q", name)
 }
 
 func bashHandler(st *sessionState, args json.RawMessage) string {
@@ -649,8 +667,9 @@ func matchSegs(pat, name []string) bool {
 	return matchSegs(pat[1:], name[1:])
 }
 
-// allTools 返回全部工具定义。加一个工具 = 这里加一个条目。
-func allTools() []anthropic.ToolUnionParam {
+// assembleToolPool 每轮 LLM 调用前组装工具池：基础工具 + 已连接 MCP 服务发现的工具。
+// s14: 由静态 allTools() 改为接受 sessionState，动态合并 MCP 工具（connect_mcp 之后下一轮生效）。
+func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 	tool := func(name, desc string, props map[string]any, required []string) anthropic.ToolUnionParam {
 		t := anthropic.ToolParam{
 			Name:        name,
@@ -663,7 +682,7 @@ func allTools() []anthropic.ToolUnionParam {
 		}
 		return anthropic.ToolUnionParam{OfTool: &t}
 	}
-	return []anthropic.ToolUnionParam{
+	tools := []anthropic.ToolUnionParam{
 		tool("bash",
 			"Run a shell command. For slow commands (dependency installs, builds, long test runs) "+
 				"set run_in_background=true: the call returns a task id immediately without blocking, "+
@@ -818,5 +837,26 @@ func allTools() []anthropic.ToolUnionParam {
 			"List one-line summaries of all persisted tasks (id, status, subject, owner, dependencies).",
 			map[string]any{},
 			[]string{}),
+		// s14: MCP 外部服务连接工具 —— bring-in 外部工具的入口
+		tool("connect_mcp",
+			"Connect to an external MCP (Model Context Protocol) server to discover and use additional tools. "+
+				"After connecting, the new tools (prefixed mcp__{server}__...) become available starting the next turn. "+
+				"Use this when you need capabilities not provided by the built-in tools.",
+			map[string]any{
+				"name": map[string]string{"type": "string", "description": "Name of the MCP server to connect (e.g. 'docs', 'deploy')"},
+			},
+			[]string{"name"}),
 	}
+	// s14: 追加已连接 MCP 服务发现的工具（命名 mcp__{server}__{tool}）
+	if st != nil && st.mcp != nil {
+		mcpDefs, _ := st.mcp.assembleToolDefs()
+		tools = append(tools, mcpDefs...)
+	}
+	return tools
+}
+
+// allTools 是兼容包装：只返回基础工具（无 MCP 连接状态）。既有测试走这里；
+// 主 loop 与子代理都应使用 assembleToolPool(st)。
+func allTools() []anthropic.ToolUnionParam {
+	return assembleToolPool(nil)
 }

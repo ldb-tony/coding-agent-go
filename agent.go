@@ -34,7 +34,7 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		appLog.Info("llm request", "turn", turn, "messages", len(messages))
 
 		sendStart := time.Now()
-		resp, err := client.Send(ctx, systemPrompt(st), messages, allTools(), 8000)
+		resp, err := client.Send(ctx, systemPrompt(st), messages, assembleToolPool(st), 8000)
 		if err != nil {
 			appLog.Error("llm send failed", "turn", turn, "ms", time.Since(sendStart).Milliseconds(), "err", err)
 			// s08: prompt_too_long 时归档 + 总结 + 保留最近 5 条，最多重试 1 次

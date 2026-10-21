@@ -408,7 +408,7 @@ func TestAgentLoopDispatchesFileTool(t *testing.T) {
 func TestAllToolsRegistered(t *testing.T) {
 	tools := allTools()
 	want := []string{"bash", "read_file", "write_file", "edit_file", "glob", "grep", "todo_write", "load_skill", "task", "compact",
-		"create_task", "update_task", "claim_task", "complete_task", "get_task", "list_tasks"}
+		"create_task", "update_task", "claim_task", "complete_task", "get_task", "list_tasks", "connect_mcp"}
 	if len(tools) != len(want) {
 		t.Fatalf("allTools returned %d tools, want %d", len(tools), len(want))
 	}
@@ -421,6 +421,10 @@ func TestAllToolsRegistered(t *testing.T) {
 		}
 		if _, ok := toolHandlers[name]; !ok {
 			t.Errorf("tool %q defined in allTools but missing in toolHandlers", name)
+		}
+		// s14: 静态工具名禁止占用 mcp__ 前缀（会遮蔽 MCP fallback 分发）
+		if strings.HasPrefix(name, "mcp__") {
+			t.Errorf("static tool %q must not use reserved mcp__ prefix", name)
 		}
 	}
 }

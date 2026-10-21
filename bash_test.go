@@ -219,8 +219,8 @@ func TestRunBashWithCwd(t *testing.T) {
 		if cwd == "" {
 			t.Fatalf("cwd not captured")
 		}
-		if !strings.HasSuffix(out, "coding-agent-go") {
-			t.Fatalf("initial pwd = %q, should be workdir", out)
+		if out != workdir {
+			t.Fatalf("initial pwd = %q, want workdir %q", out, workdir)
 		}
 	})
 

@@ -245,7 +245,7 @@ read_file / write_file / edit_file / glob / grep 全部经过 `safePath` 校验�
 | [background.go](background.go) | 后台任务管理器与通知注入 |
 | [search.go](search.go) | 搜索引擎抽象：ripgrep 优先 + walker 回退 |
 | [procgroup_unix.go](procgroup_unix.go) / [procgroup_windows.go](procgroup_windows.go) | 平台相关：后台任务的进程组管理 |
-| [logging.go](logging.go) | 每轮输入/响应落盘 agent.json / input.json |
+| [logging.go](logging.go) | 每轮完整对话快照覆盖落盘 messages.json |
 | `*_test.go` | 各模块单元测试（Arrange-Act-Assert） |
 
 ## 运行时的产物目录
@@ -256,4 +256,4 @@ read_file / write_file / edit_file / glob / grep 全部经过 `safePath` 校验�
 - `.task_outputs/tool-results/` — 超大 tool_result 的落盘全文
 - `.memory/` — 跨会话记忆（记录 + MEMORY.md 索引）
 - `.tasks/` — 持久化任务图
-- `agent.json` / `input.json` — 每轮请求/响应日志
+- `messages.json` — 每轮完整对话快照（覆盖写入，含 user/assistant/tool_use/tool_result）

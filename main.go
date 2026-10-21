@@ -28,8 +28,7 @@ func main() {
 	}()
 
 	fmt.Println("s04: Hooks")
-	fmt.Printf("Inputs logged to %s\n", inputLogPath)
-	fmt.Printf("Responses logged to %s\n", agentLogPath)
+	fmt.Printf("Conversation logged to %s\n", messagesLogPath)
 	fmt.Println("Enter a question, press Enter to send. Type q to quit.")
 	fmt.Println()
 

@@ -2,8 +2,7 @@
 .env
 
 # 运行时日志产物
-agent.json
-input.json
+messages.json
 
 # 编译产物
 coding-agent-go

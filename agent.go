@@ -28,7 +28,8 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		messages = injectBackgroundResults(messages)
 		// s08: 每轮模型调用前先跑压缩流水线；只在超预算时才真正动手
 		messages = cpt.prepare(ctx, messages, activeRequest)
-		logInput(turn, messages)
+		// 覆盖写入完整快照：先落用户输入（及历史），收到响应后再加上模型回答。
+		logMessages(turn, messages)
 
 		resp, err := client.Send(ctx, systemPrompt(st), messages, allTools(), 8000)
 		if err != nil {
@@ -44,9 +45,10 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 			return messages, err
 		}
 		reactiveRetries = 0 // 成功一次后重置，下一次 prompt_too_long 仍能兜底
-		logResponse(turn, resp)
 
 		messages = append(messages, resp.ToParam())
+		// 模型回答（含 tool_use）写入同一份快照。
+		logMessages(turn, messages)
 
 		var results []anthropic.ContentBlockParamUnion
 		usedTodoThisRound := false
@@ -126,6 +128,8 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		}
 
 		messages = append(messages, anthropic.NewUserMessage(results...))
+		// tool_result 写入后再次覆盖，保证快照始终是最完整的当前对话。
+		logMessages(turn, messages)
 
 		// s08: 模型请求 compact 时，在整个 batch 的 tool_result 都进 messages 之后再压缩
 		if compactRequested {

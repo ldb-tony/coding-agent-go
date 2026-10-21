@@ -38,12 +38,10 @@ func textResponse(t *testing.T) *anthropic.Message {
 func setupLogPaths(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
-	oldAgent, oldInput := agentLogPath, inputLogPath
-	agentLogPath = filepath.Join(dir, "agent.json")
-	inputLogPath = filepath.Join(dir, "input.json")
+	oldPath := messagesLogPath
+	messagesLogPath = filepath.Join(dir, "messages.json")
 	t.Cleanup(func() {
-		agentLogPath = oldAgent
-		inputLogPath = oldInput
+		messagesLogPath = oldPath
 	})
 	// s09：loop 级测试默认关闭记忆召回/抽取——两者会额外消耗 mock 响应序列，
 	// 打乱既有测试的 calls 计数。需要记忆行为的测试随后用 setMemoryEnabled(t, true) 打开。

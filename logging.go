@@ -10,60 +10,31 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-var (
-	agentLogPath = "agent.json"
-	inputLogPath = "input.json"
-)
+var messagesLogPath = "messages.json"
 
 func resetLogs() error {
-	for _, path := range []string{agentLogPath, inputLogPath} {
-		if err := os.WriteFile(path, []byte("[]"), 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
+	// 快照日志：每次调用覆盖写入，启动时置空对象即可。
+	return os.WriteFile(messagesLogPath, []byte("{}"), 0o644)
 }
 
-func logInput(turn int, messages []anthropic.MessageParam) {
-	entry := map[string]any{
-		"ts":    time.Now().UTC().Format(time.RFC3339Nano),
-		"turn":  turn,
-		"input": messages,
-	}
-	if err := appendLog(inputLogPath, entry); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: log input: %v\n", err)
-	}
-}
-
-func logResponse(turn int, resp *anthropic.Message) {
+// logMessages 覆盖写入当前完整会话快照：用户输入、模型回答、tool_use/tool_result。
+// react 模式下 messages 本身已包含全部历史，覆盖而非追加可避免历史重复。
+func logMessages(turn int, messages []anthropic.MessageParam) {
 	entry := map[string]any{
 		"ts":       time.Now().UTC().Format(time.RFC3339Nano),
 		"turn":     turn,
-		"response": resp,
+		"messages": messages,
 	}
-	if err := appendLog(agentLogPath, entry); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: log response: %v\n", err)
-	}
-}
-
-func appendLog(path string, entry any) error {
-	var entries []json.RawMessage
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &entries)
-	}
-
-	raw, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-	entries = append(entries, raw)
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(entries); err != nil {
-		return err
+	if err := enc.Encode(entry); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: log messages: %v\n", err)
+		return
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o644)
+	if err := os.WriteFile(messagesLogPath, buf.Bytes(), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: log messages: %v\n", err)
+	}
 }

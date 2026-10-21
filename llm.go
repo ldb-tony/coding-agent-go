@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
 
@@ -27,7 +26,9 @@ func newAnthropicClient() LLMClient {
 
 	modelID := os.Getenv("MODEL_ID")
 	if modelID == "" {
-		log.Fatal("MODEL_ID environment variable is required")
+		appLog.Error("MODEL_ID environment variable is required")
+		fmt.Fprintln(os.Stderr, "MODEL_ID environment variable is required")
+		os.Exit(1)
 	}
 
 	baseURL := os.Getenv("ANTHROPIC_BASE_URL")

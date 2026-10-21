@@ -3,6 +3,7 @@
 
 # 运行时日志产物
 messages.json
+coding-agent-go.log
 
 # 编译产物
 coding-agent-go

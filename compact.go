@@ -96,6 +96,7 @@ func (c *compactor) prepare(ctx context.Context, messages []anthropic.MessagePar
 			messages = c.fitToolResults(messages, target)
 		}
 		if c.estimateChars(messages) > contextCharLimit {
+			appLog.Warn("auto compact", "chars", c.estimateChars(messages), "messages", len(messages))
 			fmt.Println("[auto compact]")
 			messages = c.compactHistory(ctx, messages, activeRequest)
 		}
@@ -317,6 +318,7 @@ func (c *compactor) fitToolResults(messages []anthropic.MessageParam, targetChar
 // compactHistory 写归档、调模型总结、用一条 [Compacted] user message 替换整段历史。
 func (c *compactor) compactHistory(ctx context.Context, messages []anthropic.MessageParam, activeRequest string) []anthropic.MessageParam {
 	transcript := c.writeTranscript(messages)
+	appLog.Info("compact history", "transcript", transcript, "messages", len(messages))
 	fmt.Printf("[transcript saved: %s]\n", transcript)
 	summary := c.summarizeHistory(ctx, messages)
 	return []anthropic.MessageParam{
@@ -368,6 +370,7 @@ func (c *compactor) summarizeHistory(ctx context.Context, messages []anthropic.M
 	}
 	resp, err := c.client.Send(ctx, summarySystemPrompt, messages, nil, 2000)
 	if err != nil {
+		appLog.Error("summarize history failed", "err", err)
 		return fmt.Sprintf("(summary failed: %v; full transcript archived)", err)
 	}
 	var sb strings.Builder

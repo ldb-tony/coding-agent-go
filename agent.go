@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -30,13 +31,17 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		messages = cpt.prepare(ctx, messages, activeRequest)
 		// 覆盖写入完整快照：先落用户输入（及历史），收到响应后再加上模型回答。
 		logMessages(turn, messages)
+		appLog.Info("llm request", "turn", turn, "messages", len(messages))
 
+		sendStart := time.Now()
 		resp, err := client.Send(ctx, systemPrompt(st), messages, allTools(), 8000)
 		if err != nil {
+			appLog.Error("llm send failed", "turn", turn, "ms", time.Since(sendStart).Milliseconds(), "err", err)
 			// s08: prompt_too_long 时归档 + 总结 + 保留最近 5 条，最多重试 1 次
 			errMsg := strings.ToLower(err.Error())
 			tooLong := strings.Contains(errMsg, "prompt_too_long") || strings.Contains(errMsg, "too many tokens")
 			if tooLong && reactiveRetries < maxReactiveRetries {
+				appLog.Warn("prompt_too_long, reactive compact", "turn", turn, "retry", reactiveRetries+1)
 				fmt.Println("[reactive compact]")
 				messages = cpt.reactiveCompact(ctx, messages, activeRequest)
 				reactiveRetries++
@@ -45,6 +50,15 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 			return messages, err
 		}
 		reactiveRetries = 0 // 成功一次后重置，下一次 prompt_too_long 仍能兜底
+		toolUses := 0
+		for _, block := range resp.Content {
+			if block.Type == "tool_use" {
+				toolUses++
+			}
+		}
+		appLog.Info("llm response", "turn", turn, "ms", time.Since(sendStart).Milliseconds(),
+			"stop_reason", resp.StopReason, "input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens, "tool_uses", toolUses)
 
 		messages = append(messages, resp.ToParam())
 		// 模型回答（含 tool_use）写入同一份快照。
@@ -72,6 +86,7 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 			// s04：权限校验、调用日志等扩展逻辑从 loop 里移出，改由 PreToolUse hook 决定。
 			// hook 返回非 nil 表示拦截本次工具调用，返回值作为 tool_result 回喂模型。
 			if blocked := triggerHooks(EventPreToolUse, hc); blocked != nil {
+				appLog.Warn("tool blocked by hook", "turn", turn, "tool", block.Name, "reason", *blocked)
 				fmt.Println(*blocked)
 				results = append(results, anthropic.NewToolResultBlock(block.ID, *blocked, true))
 				continue
@@ -81,11 +96,15 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 			// s11: run_in_background 的 bash 调用交给后台 goroutine，本轮先返回带
 			// bg_id 的占位结果，让 loop 继续处理后续工具调用与下一轮。
 			var output string
-			if shouldRunBackground(block.Name, block.Input) {
+			background := shouldRunBackground(block.Name, block.Input)
+			toolStart := time.Now()
+			if background {
 				output = startBackgroundTask(block.Input)
 			} else {
 				output = runTool(st, block.Name, block.Input)
 			}
+			appLog.Info("tool exec", "turn", turn, "tool", block.Name, "background", background,
+				"ms", time.Since(toolStart).Milliseconds(), "output_runes", len([]rune(output)))
 			if runes := []rune(output); len(runes) > 200 {
 				fmt.Println(string(runes[:200]))
 			} else {
@@ -102,9 +121,11 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		if len(results) == 0 {
 			// s04：loop 即将退出时触发 Stop；返回非 nil 则注入消息并继续循环。
 			if force := triggerHooks(EventStop, &hookContext{Messages: messages}); force != nil {
+				appLog.Info("stop hook injected message, loop continues", "turn", turn)
 				messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(*force)))
 				continue
 			}
+			appLog.Info("agent loop done", "turns", turn+1)
 			// s09: 轮末抽取可复用知识（失败只告警，不影响正常返回）；
 			// 有新记录且库存达到阈值时顺带触发合并。
 			if stored := st.extractMemories(messages); stored {

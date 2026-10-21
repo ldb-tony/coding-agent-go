@@ -257,3 +257,4 @@ read_file / write_file / edit_file / glob / grep 全部经过 `safePath` 校验�
 - `.memory/` — 跨会话记忆（记录 + MEMORY.md 索引）
 - `.tasks/` — 持久化任务图
 - `messages.json` — 每轮完整对话快照（覆盖写入，含 user/assistant/tool_use/tool_result）
+- `coding-agent-go.log` — 运行诊断日志（append 写入，Info/Warn/Error，进程退出后保留）

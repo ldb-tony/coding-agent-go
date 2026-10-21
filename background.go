@@ -73,6 +73,7 @@ func (m *backgroundManager) start(command string) string {
 	cmd.Stderr = &stderr
 	t := &backgroundTask{id: id, command: command, status: "running", cmd: cmd, cancel: cancel}
 	m.tasks[id] = t
+	appLog.Info("background task started", "id", id, "command", command)
 	go m.run(t, ctx, &stdout, &stderr)
 	return id
 }
@@ -102,6 +103,12 @@ func (m *backgroundManager) run(t *backgroundTask, ctx context.Context, stdout, 
 	t.cmd = nil
 	m.ready = append(m.ready, t.id)
 	m.mu.Unlock()
+
+	if status == "completed" {
+		appLog.Info("background task finished", "id", t.id, "status", status)
+	} else {
+		appLog.Warn("background task failed", "id", t.id, "status", status, "detail", detail)
+	}
 }
 
 // combineBashOutput 合并 stdout/stderr 并按同步 bash 的规则截断。
@@ -151,15 +158,20 @@ func (m *backgroundManager) taskStatus(id string) string {
 func (m *backgroundManager) stopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	stopped := 0
 	for _, t := range m.tasks {
 		if t.status != "running" {
 			continue
 		}
+		stopped++
 		if t.cmd != nil && t.cmd.Process != nil {
 			stopProcessGroup(t.cmd)
 		} else if t.cancel != nil {
 			t.cancel()
 		}
+	}
+	if stopped > 0 {
+		appLog.Info("background tasks stopped", "count", stopped)
 	}
 }
 

@@ -16,6 +16,9 @@ import (
 
 var messagesLogPath = "messages.json"
 
+// readlineHistoryPath readline 命令历史文件（↑↓ 翻页、跨进程保留）。
+var readlineHistoryPath = ".coding-agent-history"
+
 // appLogPath 运行诊断日志（append 模式，进程退出后保留，用于定位异常退出）。
 var appLogPath = "coding-agent-go.log"
 

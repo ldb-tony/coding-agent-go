@@ -92,6 +92,22 @@ func askUser(toolName string, args json.RawMessage, reason string) bool {
 
 // checkPermission 按固定顺序过三道门：硬拒 → 规则+询问 → 直通。
 func checkPermission(toolName string, args json.RawMessage) bool {
+	// s14: MCP 外部工具走独立的 host-side 策略（server 自称的 readOnlyHint 不可信）
+	if isMCPTool(toolName) {
+		server, safeTool, ok := parseMCPName(toolName)
+		if !ok {
+			return true // 名字无法解析时交给 runTool 的 fallback 报错，不在这里拦
+		}
+		switch mcpPermission(server, safeTool) {
+		case mcpPermAllow:
+			return true
+		case mcpPermDeny:
+			fmt.Printf("\n⛔ Blocked: MCP tool %q denied by host policy\n", toolName)
+			return false
+		default: // mcpPermConfirm —— 未配置的外部工具默认也落这里
+			return askUser(toolName, args, "MCP external tool — host policy requires confirmation")
+		}
+	}
 	// Gate 1: 硬性拒绝清单（仅 bash）
 	if toolName == "bash" {
 		var in struct {

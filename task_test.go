@@ -55,7 +55,7 @@ func newSubState(client LLMClient) *sessionState {
 
 // TestSubToolsExcludesTask 验证子代理工具集不含 task（只允许一层委派），其余基础工具保留。
 func TestSubToolsExcludesTask(t *testing.T) {
-	tools := subTools()
+	tools := subTools(newSessionState())
 	if len(tools) == 0 {
 		t.Fatal("subTools returned no tools")
 	}

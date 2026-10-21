@@ -60,6 +60,7 @@ go test ./...
 - [跨会话记忆](#跨会话记忆) — 存储 / 召回 / 抽取 / 合并四个子系统，落盘在 .memory/
 - [持久化任务图](#持久化任务图) — .tasks/*.json 跨会话可恢复的 DAG，两阶段建图
 - [后台任务](#后台任务) — run_in_background 立即返回，结果以 `<task_notification>` 后续注入
+- [MCP 外部工具连接](#mcp-外部工具连接) — 运行时 connect_mcp bring-in 外部服务发现的工具，mcp__{server}__{tool} 命名
 - [搜索引擎抽象](#搜索引擎抽象) — ripgrep 优先 + Go walker 回退，统一尊重 .gitignore
 
 ---
@@ -213,6 +214,30 @@ read_file / write_file / edit_file / glob / grep 全部经过 `safePath` 校验�
 
 **设计原因**：安装依赖、编译、跑长测试这类命令会阻塞 loop 几分钟。后台化让模型"边等边干别的"。管理器挂包级全局而非 sessionState，因为 REPL 每轮新建 agentLoop，而任务生命周期跨越多轮对话。
 
+### MCP 外部工具连接
+
+[MCP（Model Context Protocol）](https://modelcontextprotocol.io/) 让 Agent 在运行时发现并调用外部服务提供的工具，而不是把所有工具写死在 `tools.go` 里。本项目实现的是 **s14 教学版**：服务端以进程内 mock server 形式存在（docs + deploy 两个示例），真实 MCP 传输层（stdio/SSE）通过实现 `MCPServer` 接口即可接入。
+
+核心组件：
+
+- **`MCPServer` 接口**（[mcp.go](mcp.go)）：`ListTools() → []ToolDef` 暴露工具列表，`CallTool(name, args) → (string, error)` 执行调用。真实 MCP 客户端只需把这两个方法桥接到协议层即可。
+- **`mcpRegistry`**：会话级注册表，管理所有已连接的 server。每轮 `assembleToolPool(st)` 调用时把已发现的 MCP 工具追加到基础工具池尾部。
+- **工具命名**：`mcp__{server}__{tool}`。`safeToolName` 把 server/tool 名里的非 `[A-Za-z0-9_]` 字符替换为下划线；注册期检测碰撞（不同 server 规范化后撞名直接拒绝）。
+- **宿主侧权限策略**（[mcp_permission.go](mcp_permission.go)）：MCP server 自称的 `readOnlyHint` / `destructiveHint` 不可信，宿主独立配置 `(server, tool) → allow | confirm | deny`。未配置的外部工具**默认 confirm**——最坏情况用户被询问。
+- **`connect_mcp` 工具**：Agent 用它主动 bring-in 外部服务。连接成功后，下一轮 Send 的工具池才包含新工具（模型先看到 connect_mcp 自己，下一轮才看到 mcp__docs__* 等）。
+
+接入链路：
+
+```
+connect_mcp(name="docs")        → connectMCPHandler → mcpRegistry.connect → server.ListTools → 发现 2 个工具
+下一轮 assembleToolPool(st)     → 基础工具 + mcp__docs__search + mcp__docs__get_version 一起进模型
+mcp__docs__search(query="...")  → runTool mcp__ fallback → mcpRegistry.clients[docs].callTool("search", args) → server.CallTool("search", ...)
+```
+
+**接入点总结**：要加一个新的 mock server，在 `mockMCPFactories` map 里注册 `func() MCPServer` 工厂即可；要接真实 MCP 服务，实现 `MCPServer` 接口把 `ListTools` / `CallTool` 桥接到 stdio/SSE 传输层，同样在 map 里注册。
+
+更多细节见 [docs/mcp-connection.md](docs/mcp-connection.md)。
+
 ### 搜索引擎抽象
 
 [search.go](search.go) 为 glob/grep 提供统一底座：
@@ -232,17 +257,21 @@ read_file / write_file / edit_file / glob / grep 全部经过 `safePath` 校验�
 | [main.go](main.go) | REPL 入口、信号处理、每轮驱动 agentLoop |
 | [agent.go](agent.go) | Agent Loop：压缩流水线调度、后台结果注入、工具批执行、todo reminder |
 | [llm.go](llm.go) | Anthropic 客户端封装、system prompt 拼装 |
-| [tools.go](tools.go) | 16 个工具的 schema + 分发表 + 文件工具实现 + safePath |
+| [tools.go](tools.go) | 基础工具 schema + 分发表 + 文件工具实现 + safePath + assembleToolPool（基础工具 + MCP 动态工具） |
 | [bash.go](bash.go) | bash 执行：超时/截断/退出码语义化/cwd 持久化 |
-| [permission.go](permission.go) | 三闸门权限管线 |
+| [permission.go](permission.go) | 三闸门权限管线 + MCP host-side 策略（allow/confirm/deny） |
 | [hooks.go](hooks.go) | Hook 事件注册与触发 + 5 个内置 hook |
 | [compact.go](compact.go) | 四步上下文压缩 + reactive 兜底 |
 | [todo.go](todo.go) | 会话内待办清单 |
-| [task.go](task.go) | 子代理委派（task 工具） |
+| [task.go](task.go) | 子代理委派（task 工具）+ 每轮重算工具池（支持子代理 MCP） |
 | [taskstore.go](taskstore.go) | 持久化任务图（create/update/claim/complete/get/list） |
 | [skill.go](skill.go) | 技能扫描与按需加载 |
 | [memory.go](memory.go) | 跨会话记忆：存储/召回/抽取/合并 |
 | [background.go](background.go) | 后台任务管理器与通知注入 |
+| [mcp.go](mcp.go) | MCPServer 接口、MCPClient、mcpRegistry、connect_mcp handler、工具名规范化、输出截断 |
+| [mcp_servers.go](mcp_servers.go) | docs + deploy 两个进程内 mock server（真实接入需实现 MCPServer） |
+| [mcp_permission.go](mcp_permission.go) | MCP host-side 策略表（allow/confirm/deny，未配置默认 confirm） |
+| [mcp_test.go](mcp_test.go) | MCP 单元测试 + loop 级端到端（connect 后下一轮工具池含 mcp__docs__*） |
 | [search.go](search.go) | 搜索引擎抽象：ripgrep 优先 + walker 回退 |
 | [procgroup_unix.go](procgroup_unix.go) / [procgroup_windows.go](procgroup_windows.go) | 平台相关：后台任务的进程组管理 |
 | [logging.go](logging.go) | 每轮完整对话快照覆盖落盘 messages.json |

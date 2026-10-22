@@ -13,6 +13,12 @@ type docsServer struct{}
 
 func newDocsServer() MCPServer { return &docsServer{} }
 
+func (s *docsServer) Instructions() string {
+	return "This server exposes product documentation search and version lookup. " +
+		"Prefer mcp__docs__search over grep when you need API behavior or documented conventions, " +
+		"and use mcp__docs__get_version when the answer depends on the documented API version."
+}
+
 func (s *docsServer) ListTools() ([]ToolDef, error) {
 	return []ToolDef{
 		{
@@ -107,6 +113,12 @@ type deployServer struct {
 }
 
 func newDeployServer() MCPServer { return &deployServer{} }
+
+func (s *deployServer) Instructions() string {
+	return "This server inspects and changes shared deployment state. " +
+		"Calling mcp__deploy__trigger restarts a running service, so confirm the target service " +
+		"and image with the user before triggering, and use mcp__deploy__status to verify the outcome."
+}
 
 func (s *deployServer) ListTools() ([]ToolDef, error) {
 	return []ToolDef{

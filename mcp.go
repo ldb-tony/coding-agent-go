@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -26,6 +27,9 @@ import (
 type MCPServer interface {
 	ListTools() ([]ToolDef, error)
 	CallTool(name string, args map[string]any) (string, error)
+	// Instructions 返回 server 级使用说明（等价于 MCP 协议的 instructions 字段）。
+	// 返回空字符串表示该 server 没有额外说明。
+	Instructions() string
 }
 
 // ToolDef 描述一个 MCP 工具 (tools/list 返回的条目)。
@@ -201,6 +205,29 @@ func (r *mcpRegistry) serverNames() []string {
 		names = append(names, n)
 	}
 	return names
+}
+
+// instructionsSection 渲染已连接 server 的 instructions。没有非空说明时返回空串，
+// systemPrompt 据此跳过整个 Block。按 server 名排序保证输出稳定（利于测试与缓存）。
+func (r *mcpRegistry) instructionsSection() string {
+	names := make([]string, 0, len(r.clients))
+	for name, c := range r.clients {
+		if strings.TrimSpace(c.server.Instructions()) != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("# MCP Server Instructions\n\n")
+	b.WriteString("The following MCP servers have provided instructions for how to use their tools and resources:\n")
+	for _, name := range names {
+		fmt.Fprintf(&b, "\n## %s\n%s\n", name, strings.TrimSpace(r.clients[name].server.Instructions()))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // connect_mcp 的 mock server 注册表 —— 教学版用进程内工厂函数代表真实服务。

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,26 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+func TestCommaTokens(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0"},
+		{678, "678"},
+		{12345, "12,345"},
+		{1000000, "1,000,000"},
+		{-12345, "-12,345"},
+	}
+	for _, c := range cases {
+		if got := commaTokens(c.in); got != c.want {
+			t.Errorf("commaTokens(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// captureStdout 临时接管 os.Stdout，运行 fn 后返回捕获到的输出。
 
 type mockClient struct {
 	responses []*anthropic.Message
@@ -271,5 +292,58 @@ func TestAgentLoopTodoReminder(t *testing.T) {
 	}
 	if !reminderFound {
 		t.Fatal("expected reminder text block after 3 consecutive non-todo_write rounds")
+	}
+}
+
+// captureStdout 临时接管 os.Stdout，运行 fn 后返回捕获到的输出。
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	fn()
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// TestAgentLoopPrintsTokenUsage 验证每轮模型返回后 stdout 打印 token 用量行，含当轮值与会话累计。
+func TestAgentLoopPrintsTokenUsage(t *testing.T) {
+	setupLogPaths(t)
+
+	resp1 := mustMessage(t, `{"id":"msg1","type":"message","role":"assistant","model":"mock","content":[{"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"echo hi"}}],"stop_reason":"tool_use","usage":{"input_tokens":12345,"output_tokens":678,"cache_creation_input_tokens":100,"cache_read_input_tokens":10000}}`)
+	resp2 := mustMessage(t, `{"id":"msg2","type":"message","role":"assistant","model":"mock","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn","usage":{"input_tokens":13000,"output_tokens":22}}`)
+	client := &mockClient{responses: []*anthropic.Message{resp1, resp2}}
+	initial := []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("hello")),
+	}
+
+	stdout := captureStdout(t, func() {
+		if _, err := agentLoop(context.Background(), client, initial, "test request"); err != nil {
+			t.Errorf("agentLoop: %v", err)
+		}
+	})
+
+	count := 0
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.HasPrefix(line, "[tokens] ") {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 [tokens] lines, got %d in:\n%s", count, stdout)
+	}
+	if want := "[tokens] in=12,345 out=678 cache_create=100 cache_read=10,000 | Σ in=12,345 out=678"; !strings.Contains(stdout, want) {
+		t.Fatalf("expected first-round line %q in:\n%s", want, stdout)
+	}
+	if want := "[tokens] in=13,000 out=22 cache_create=0 cache_read=0 | Σ in=25,345 out=700"; !strings.Contains(stdout, want) {
+		t.Fatalf("expected second-round line %q in:\n%s", want, stdout)
 	}
 }

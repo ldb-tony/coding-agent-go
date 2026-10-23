@@ -53,7 +53,7 @@ go test ./...
 - [Bash 工具](#bash-工具) — 超时控制、输出截断、退出码语义化、cwd 跨调用持久化
 - [三闸门权限管线](#三闸门权限管线) — 硬拒清单 → 规则匹配 → 人工确认
 - [Hook 机制](#hook-机制) — 四个生命周期事件，扩展逻辑挂在外面而不是写进 loop
-- [上下文压缩流水线](#上下文压缩流水线) — 四步确定性压缩 + 一步模型总结 + 超限额底重试
+- [上下文压缩流水线](#上下文压缩流水线) — usage 锚点计数 + 空闲期微压缩 + 超窗口自动压缩 + 超限额底重试
 - [Todo 规划与提醒](#todo-规划与提醒) — 会话内待办清单 + 连续 3 轮未更新自动注入 reminder
 - [子代理（Subagent）](#子代理subagent) — 全新 messages[] 的嵌套 loop，只带回最终文本
 - [技能按需加载](#技能按需加载) — system prompt 只放目录，SKILL.md 全文用时才取
@@ -134,16 +134,17 @@ read_file / write_file / edit_file / glob / grep 全部经过 `safePath` 校验�
 
 ### 上下文压缩流水线
 
-[compact.go](compact.go) 在**每轮模型调用前**按固定顺序执行四步，外加一个 API 限额底：
+[compact.go](compact.go) 在**每轮模型调用前**按固定顺序执行三步，外加一个 API 限额底：
 
 1. **tool_result_budget**：当轮 tool_result 合计超 200K 字符时，单条 >30K 的落盘到 `.task_outputs/tool-results/`，上下文里只留 2K 预览
-2. **snip_compact**：消息总数超 50 时归档全量到 `.transcripts/`，保留首 3 条 + 尾 46 条，中间放归档 marker；切口保护 tool_use/tool_result 配对（孤儿 tool_result 会让 API 400）
-3. **micro_compact**：总字符仍超 50K 时，把"已消费"的旧 tool_result 替换为落盘引用（最近 3 条除外）
-4. **compact_history**：仍超限时才调模型生成事实性 summary，整段历史替换为一条 `[Compacted]` user message
+2. **micro_compact（time-based）**：距最后一条 assistant 响应空闲 ≥60 分钟时，把白名单工具（read_file/bash/grep/glob/write_file/edit_file）旧 tool_result 替换为 `[Old tool result content cleared]`，保留最近 5 个；幂等，且只改 content、不动消息结构
+3. **auto_compact**：token 估算达到 167k（200k 窗口 − 20k 摘要预留 − 13k 缓冲）才触发——写归档 → 调模型生成九章节 summary → 组装 `[Compacted]` 摘要消息 + 附件（最近 5 个文件重读 / plan / 已加载 skills）+ 最近 4 条尾部（配对保护）
 
-另有 **reactive_compact**：API 直接返回 `prompt_too_long` 时归档 + 总结 + 保留最近 5 条，最多重试 1 次。
+token 计数以 **API usage 为锚点**（`observeUsage` 记录上次响应的官方计数）+ 新增消息粗估（rune 数/4 再 ×4/3 放大）。另有 **reactive_compact**：API 直接返回 `prompt_too_long` 时归档 + 总结 + 保留最近 5 条，最多重试 1 次。
 
-**设计原因**：顺序按"成本与信息损失"严格递增——Step 1/2 是零 API 成本、完全可恢复的确定性操作；Step 3 开始丢失上下文内细节；只有 Step 4 引入模型调用与不可逆的信息损失。能不总结就不总结。同时模型也可以主动调 `compact` 工具请求压缩（在一个阶段完成后）。
+**失败策略**：auto-compact 失败不写任何消息（历史原样保留），连续 3 次失败熔断；手动（`compact` 工具）失败只打印 `[compact failed: ...]`。摘要 prompt 为九章节结构（禁工具前言 + `<analysis>` 草稿块后处理），完整推导见 [docs/compact-gap-analysis.md](docs/compact-gap-analysis.md)。
+
+**设计原因**：顺序按"成本与信息损失"严格递增——Step 1/2 是零 API 成本、低信息损失的确定性操作；只有 Step 3 引入模型调用与不可逆的信息损失，所以它必须发生在真实窗口压力下（167k）而不是"50 条消息"或"50K 字节"这类与窗口脱钩的代理指标上。micro_compact 选在空闲 ≥60 分钟（对齐 prompt cache TTL）触发，收益是缩小下一轮必然发生的全量重写。
 
 ### Todo 规划与提醒
 
@@ -261,7 +262,7 @@ mcp__docs__search(query="...")  → runTool mcp__ fallback → mcpRegistry.clien
 | [bash.go](bash.go) | bash 执行：超时/截断/退出码语义化/cwd 持久化 |
 | [permission.go](permission.go) | 三闸门权限管线 + MCP host-side 策略（allow/confirm/deny） |
 | [hooks.go](hooks.go) | Hook 事件注册与触发 + 5 个内置 hook |
-| [compact.go](compact.go) | 四步上下文压缩 + reactive 兜底 |
+| [compact.go](compact.go) | 上下文压缩：usage 锚点计数 + time-based 微压缩 + 自动压缩（附件/尾部/熔断）+ reactive 兜底 |
 | [todo.go](todo.go) | 会话内待办清单 |
 | [task.go](task.go) | 子代理委派（task 工具）+ 每轮重算工具池（支持子代理 MCP） |
 | [taskstore.go](taskstore.go) | 持久化任务图（create/update/claim/complete/get/list） |

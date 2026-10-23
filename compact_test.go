@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
@@ -18,6 +20,14 @@ import (
 func newTestCompactor(t *testing.T, client LLMClient) *compactor {
 	t.Helper()
 	return newCompactor(t.TempDir(), client)
+}
+
+// fakeClock 把 compactor 的时钟换成可推进的假时钟，返回推进函数。
+// lastAssistantAt 由 observeUsage 写入，micro_compact 的空闲判定用它。
+func fakeClock(c *compactor, base time.Time) func(time.Duration) {
+	cur := base
+	c.now = func() time.Time { return cur }
+	return func(d time.Duration) { cur = cur.Add(d) }
 }
 
 // userText 构造一条纯文本 user message。
@@ -50,7 +60,22 @@ func toolResultOf(t *testing.T, msg anthropic.MessageParam, bi int) *anthropic.T
 	return tr
 }
 
-// summaryMockClient 是 mockClient 的扩展：对 summarize 调用返回固定文本。
+// textOf 返回消息里所有 text block 拼接后的内容（不存在则 fail）。
+func textOf(t *testing.T, msg anthropic.MessageParam) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, block := range msg.Content {
+		if block.OfText != nil {
+			sb.WriteString(block.OfText.Text)
+		}
+	}
+	if sb.Len() == 0 {
+		t.Fatal("message has no text block")
+	}
+	return sb.String()
+}
+
+// summaryMockClient 对 summarize 调用返回固定文本。
 type summaryMockClient struct {
 	summary string
 	calls   int
@@ -66,6 +91,15 @@ func (m *summaryMockClient) Send(ctx context.Context, system string, messages []
 	return &msg, nil
 }
 
+// failingMockClient 对所有调用返回固定错误（模拟摘要失败）。
+type failingMockClient struct {
+	err error
+}
+
+func (m *failingMockClient) Send(ctx context.Context, system string, messages []anthropic.MessageParam, tools []anthropic.ToolUnionParam, maxTokens int64) (*anthropic.Message, error) {
+	return nil, m.err
+}
+
 // ============ Step 1: tool_result_budget ============
 
 func TestToolResultBudgetBelowBudget(t *testing.T) {
@@ -74,7 +108,10 @@ func TestToolResultBudgetBelowBudget(t *testing.T) {
 		userText("q"),
 		userToolResult("tu_1", strings.Repeat("a", 1000)),
 	}
-	out := c.toolResultBudget(messages)
+	out, changed := c.toolResultBudget(messages)
+	if changed {
+		t.Fatal("below budget should not change anything")
+	}
 	if got := toolResultText(toolResultOf(t, out[1], 0)); got != strings.Repeat("a", 1000) {
 		t.Fatalf("expected content unchanged, got %d chars", len(got))
 	}
@@ -91,7 +128,10 @@ func TestToolResultBudgetPersistsLargeResult(t *testing.T) {
 	}
 	messages = append(messages, anthropic.NewUserMessage(blocks...))
 
-	out := c.toolResultBudget(messages)
+	out, changed := c.toolResultBudget(messages)
+	if !changed {
+		t.Fatal("expected changes when over budget")
+	}
 
 	// 至少有一条被替换成 "[Large output saved at ...]"，且对应文件已落盘
 	persistedCount := 0
@@ -113,225 +153,343 @@ func TestToolResultBudgetPersistsLargeResult(t *testing.T) {
 	}
 }
 
-// ============ Step 2: snip_compact ============
+// ============ token 计数 ============
 
-func TestSnipCompactBelowThreshold(t *testing.T) {
+func TestTokenCountUsesUsageAnchor(t *testing.T) {
 	c := newTestCompactor(t, nil)
-	messages := []anthropic.MessageParam{userText("q1"), userText("q2")}
-	out := c.snipCompact(messages)
-	if len(out) != 2 {
-		t.Fatalf("expected 2 messages unchanged, got %d", len(out))
+	messages := []anthropic.MessageParam{
+		userText("aaaa"), userText("bbbb"), userText("cccc"), userText("dddd"),
+	}
+	// 锚点：前 2 条消息对应的响应实测 1500 token
+	c.observeUsage(anthropic.Usage{InputTokens: 1000, OutputTokens: 500}, 2)
+
+	want := 1500 + c.estimateTokens(messages[2:])
+	if got := c.tokenCount(messages); got != want {
+		t.Fatalf("tokenCount = %d, want anchor(1500) + incremental(%d)", got, want)
+	}
+	// 锚点必须覆盖前缀：总量应明显大于纯增量部分
+	if got := c.tokenCount(messages); got <= c.estimateTokens(messages[2:]) {
+		t.Fatalf("anchor tokens not included: %d", got)
+	}
+	// 锚点失效后退回纯估算
+	c.resetAnchor()
+	if got := c.tokenCount(messages); got != c.estimateTokens(messages) {
+		t.Fatalf("after reset, tokenCount should be pure estimate: %d vs %d",
+			got, c.estimateTokens(messages))
 	}
 }
 
-func TestSnipCompactArchivesOldMessages(t *testing.T) {
+func TestAutoCompactThresholdFromWindow(t *testing.T) {
 	c := newTestCompactor(t, nil)
-	// 造 60 条 user 文本消息（无 tool_use/tool_result，切口安全）
-	messages := make([]anthropic.MessageParam, 60)
-	for i := range messages {
-		messages[i] = userText(fmt.Sprintf("msg %d", i))
+	if got := c.autoCompactThreshold(); got != 167000 {
+		t.Fatalf("default threshold = %d, want 167000 (200k - 20k - 13k)", got)
 	}
-	out := c.snipCompact(messages)
-
-	// 应该压到 snipMaxMessages=50 条：head 3 + marker 1 + tail 46
-	if len(out) != snipMaxMessages {
-		t.Fatalf("expected %d messages, got %d", snipMaxMessages, len(out))
+	// AUTO_COMPACT_WINDOW 向下覆盖
+	t.Setenv("AUTO_COMPACT_WINDOW", "100000")
+	c2 := newTestCompactor(t, nil)
+	if got := c2.autoCompactThreshold(); got != 67000 {
+		t.Fatalf("overridden threshold = %d, want 67000", got)
 	}
-	// 中间 marker 是 "[N messages archived at ...]"
-	markerText := out[snipHeadKeep].Content[0].OfText.Text
-	if !strings.Contains(markerText, "messages archived at") {
-		t.Fatalf("expected archive marker, got %q", markerText)
-	}
-	// 归档文件已写入
-	entries, err := os.ReadDir(c.transcriptsDir)
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("expected transcript file in %s: %v", c.transcriptsDir, err)
+	// 只能向下（min 语义）：更大的值不生效
+	t.Setenv("AUTO_COMPACT_WINDOW", "500000")
+	c3 := newTestCompactor(t, nil)
+	if got := c3.autoCompactThreshold(); got != 167000 {
+		t.Fatalf("larger window must be ignored, got threshold %d", got)
 	}
 }
 
-func TestSnipCompactProtectsToolPairs(t *testing.T) {
+func TestShouldAutoCompact(t *testing.T) {
 	c := newTestCompactor(t, nil)
-	// 造 60 条：前 55 条是 user text，最后 5 条是 assistant(tool_use) + user(tool_result) 交替
-	messages := make([]anthropic.MessageParam, 0, 60)
-	for i := 0; i < 55; i++ {
-		messages = append(messages, userText(fmt.Sprintf("msg %d", i)))
+	messages := []anthropic.MessageParam{userText("hello")}
+	if c.shouldAutoCompact(messages) {
+		t.Fatal("below threshold should not trigger")
 	}
-	messages = append(messages, assistantToolUse("tu_a", "bash"))
-	messages = append(messages, userToolResult("tu_a", "ok"))
-	messages = append(messages, assistantToolUse("tu_b", "bash"))
-	messages = append(messages, userToolResult("tu_b", "ok"))
-	messages = append(messages, userText("tail"))
-
-	out := c.snipCompact(messages)
-
-	// 验证没有孤儿 tool_result：任何 user(tool_result) 的前一条必须是 assistant(tool_use)
-	for i := 1; i < len(out); i++ {
-		if isToolResult(out[i]) && !hasToolUse(out[i-1]) {
-			t.Fatalf("orphan tool_result at index %d; prev message has no tool_use", i)
-		}
+	// 用锚点伪造达到阈值
+	c.observeUsage(anthropic.Usage{InputTokens: int64(c.autoCompactThreshold())}, 0)
+	if !c.shouldAutoCompact(messages) {
+		t.Fatal("at threshold should trigger")
+	}
+	// 连续失败达上限 → 熔断
+	c.consecutiveFailures = maxConsecutiveCompactFailures
+	if c.shouldAutoCompact(messages) {
+		t.Fatal("breaker open should not trigger")
 	}
 }
 
-// ============ Step 3: micro_compact ============
+// ============ Step 2: micro_compact（time-based） ============
 
-func TestMicroCompactReplacesOldConsumedResults(t *testing.T) {
-	c := newTestCompactor(t, nil)
-	// 5 个已消费的大结果（每个后跟 assistant 消息）+ 1 个未消费的大结果
+// microCompactFixture 构造 8 个工具调用对：1 个 todo_write（非白名单）+ 7 个 read_file，
+// 已观察锚点、时钟在 base。
+func microCompactFixture(t *testing.T, c *compactor) []anthropic.MessageParam {
+	t.Helper()
 	messages := []anthropic.MessageParam{userText("start")}
-	for i := 0; i < 5; i++ {
+	messages = append(messages,
+		assistantToolUse("tu_todo", "todo_write"),
+		userToolResult("tu_todo", strings.Repeat("plan line\n", 50)))
+	for i := 0; i < 7; i++ {
 		messages = append(messages,
-			userToolResult(fmt.Sprintf("tu_old_%d", i), strings.Repeat("x", 5000)),
-			assistantToolUse(fmt.Sprintf("tu_next_%d", i), "bash"),
-		)
+			assistantToolUse(fmt.Sprintf("tu_read_%d", i), "read_file"),
+			userToolResult(fmt.Sprintf("tu_read_%d", i), strings.Repeat("x", 500)))
 	}
-	// 最后一条是未消费的（其后没有 assistant）
-	messages = append(messages, userToolResult("tu_new", strings.Repeat("y", 5000)))
+	c.observeUsage(anthropic.Usage{InputTokens: 10, OutputTokens: 1}, 0)
+	return messages
+}
 
-	target := c.estimateChars(messages) // 初始值；要求压缩后严格更小
-	out := c.microCompact(messages, target-1)
+func TestMicroCompactIdleSkipsRecentAssistant(t *testing.T) {
+	c := newTestCompactor(t, nil)
+	advance := fakeClock(c, time.Unix(1700000000, 0))
+	messages := microCompactFixture(t, c)
 
-	// 已消费的前 2 个应该被替换（保留最近 3 个已消费 + 1 个未消费）
-	replaced := 0
-	for mi, m := range out {
-		for bi := range m.Content {
-			tr := m.Content[bi].OfToolResult
-			if tr == nil {
-				continue
-			}
-			if strings.Contains(toolResultText(tr), "[Earlier tool result saved at") {
-				replaced++
-				_ = mi
-				_ = bi
-			}
+	advance(30 * time.Minute) // 未到 60 分钟空闲线
+	out, changed := c.microCompactIdle(messages)
+	if changed {
+		t.Fatal("gap < 60min must not trigger micro compact")
+	}
+	if got := toolResultText(toolResultOf(t, out[4], 0)); !strings.HasPrefix(got, "xxx") {
+		t.Fatal("content must remain untouched")
+	}
+}
+
+func TestMicroCompactIdleClearsOldWhitelisted(t *testing.T) {
+	c := newTestCompactor(t, nil)
+	advance := fakeClock(c, time.Unix(1700000000, 0))
+	messages := microCompactFixture(t, c)
+
+	advance(61 * time.Minute)
+	out, changed := c.microCompactIdle(messages)
+	if !changed {
+		t.Fatal("expected old whitelisted results to be cleared")
+	}
+
+	// 白名单里只有 7 个 read_file：保留最后 5 个，清掉最早的 2 个
+	for i := 0; i < 7; i++ {
+		// fixture 中 user(tu_read_i) 的位置是 4 + 2i
+		idx := 4 + i*2
+		got := toolResultText(toolResultOf(t, out[idx], 0))
+		if i < 2 && got != clearedPlaceholder {
+			t.Fatalf("tu_read_%d should be cleared, got %.40q", i, got)
+		}
+		if i >= 2 && !strings.HasPrefix(got, "xxx") {
+			t.Fatalf("tu_read_%d should be kept complete, got %.40q", i, got)
 		}
 	}
-	if replaced == 0 {
-		t.Fatal("expected at least one consumed result to be replaced")
-	}
-
-	// 未消费的最后一条必须保留完整（其后没有 assistant 消息）
-	lastTR := toolResultOf(t, out[len(out)-1], 0)
-	if got := toolResultText(lastTR); !strings.HasPrefix(got, "yyy") {
-		t.Fatalf("unseen result must remain complete, got prefix %.20q", got)
+	// 非白名单（todo_write）永不清
+	if got := toolResultText(toolResultOf(t, out[2], 0)); !strings.HasPrefix(got, "plan line") {
+		t.Fatalf("todo_write result must never be cleared, got %.40q", got)
 	}
 }
 
-func TestMicroCompactSkipsShortResults(t *testing.T) {
+func TestMicroCompactIdleIdempotent(t *testing.T) {
 	c := newTestCompactor(t, nil)
-	messages := []anthropic.MessageParam{
-		userText("start"),
-		userToolResult("tu_short", "short"), // < microMinLen=120，不应替换
-		assistantToolUse("tu_x", "bash"),
-		userToolResult("tu_new", strings.Repeat("z", 5000)),
+	advance := fakeClock(c, time.Unix(1700000000, 0))
+	messages := microCompactFixture(t, c)
+
+	advance(61 * time.Minute)
+	out, changed := c.microCompactIdle(messages)
+	if !changed {
+		t.Fatal("first pass should clear old results")
 	}
-	target := c.estimateChars(messages) - 1
-	out := c.microCompact(messages, target)
-	// 短结果保留原样
-	if got := toolResultText(toolResultOf(t, out[1], 0)); got != "short" {
-		t.Fatalf("short result should remain unchanged, got %q", got)
+	anchorAfterFirst := c.anchorTokens
+
+	// 第二遍：全部已是占位符，不应有任何改动或再扣锚点
+	_, changed2 := c.microCompactIdle(out)
+	if changed2 {
+		t.Fatal("second pass must be a no-op (idempotent)")
+	}
+	if c.anchorTokens != anchorAfterFirst {
+		t.Fatalf("anchorTokens changed on second pass: %d -> %d", anchorAfterFirst, c.anchorTokens)
 	}
 }
 
-// ============ Step 4: compact_history ============
+func TestMicroCompactIdlePreservesToolUse(t *testing.T) {
+	c := newTestCompactor(t, nil)
+	advance := fakeClock(c, time.Unix(1700000000, 0))
+	messages := microCompactFixture(t, c)
 
-func TestCompactHistoryReplacesWithSummaryMessage(t *testing.T) {
-	client := &summaryMockClient{summary: "did step 1, decided X, remaining: step 2"}
-	c := newTestCompactor(t, client)
-	messages := []anthropic.MessageParam{
-		userText("original request"),
-		userText("intermediate"),
-		userText("more"),
-	}
+	advance(61 * time.Minute)
+	out, _ := c.microCompactIdle(messages)
 
-	out := c.compactHistory(context.Background(), messages, "current query")
-
-	if len(out) != 1 {
-		t.Fatalf("expected 1 compacted message, got %d", len(out))
+	// 清理只动 tool_result 的 content；assistant 的 tool_use 块必须原样保留
+	if got, want := countToolUseMessages(out), countToolUseMessages(messages); got != want {
+		t.Fatalf("tool_use blocks changed: %d -> %d", want, got)
 	}
-	text := out[0].Content[0].OfText.Text
-	if !strings.Contains(text, "[Compacted]") {
-		t.Errorf("expected [Compacted] tag, got %q", text)
-	}
-	if !strings.Contains(text, "Current user request: current query") {
-		t.Errorf("expected active request preserved, got %q", text)
-	}
-	if !strings.Contains(text, "did step 1") {
-		t.Errorf("expected summary embedded, got %q", text)
-	}
-	if !strings.Contains(text, "Full transcript:") {
-		t.Errorf("expected transcript path, got %q", text)
-	}
-	if client.calls != 1 {
-		t.Errorf("expected 1 summarize call, got %d", client.calls)
-	}
-	// 归档文件存在
-	entries, _ := os.ReadDir(c.transcriptsDir)
-	if len(entries) == 0 {
-		t.Error("expected transcript file written")
-	}
-}
-
-// ============ reactive_compact ============
-
-func TestReactiveCompactKeepsRecentMessages(t *testing.T) {
-	client := &summaryMockClient{summary: "older summary"}
-	c := newTestCompactor(t, client)
-
-	messages := make([]anthropic.MessageParam, 0, 10)
-	for i := 0; i < 8; i++ {
-		messages = append(messages, userText(fmt.Sprintf("old %d", i)))
-	}
-	messages = append(messages, userText("recent 1"), userText("recent 2"))
-
-	out := c.reactiveCompact(context.Background(), messages, "active req")
-
-	// 1 个 [Reactive compact] marker + 最近 5 条
-	if len(out) != 1+reactiveKeepRecent {
-		t.Fatalf("expected %d messages, got %d", 1+reactiveKeepRecent, len(out))
-	}
-	text := out[0].Content[0].OfText.Text
-	if !strings.Contains(text, "[Reactive compact]") {
-		t.Errorf("expected [Reactive compact] tag, got %q", text)
-	}
-	if !strings.Contains(text, "Current user request: active req") {
-		t.Errorf("expected active request, got %q", text)
-	}
-}
-
-func TestReactiveCompactProtectsToolPairs(t *testing.T) {
-	client := &summaryMockClient{summary: "summary"}
-	c := newTestCompactor(t, client)
-
-	// 切口位置刚好在 assistant(tool_use) → user(tool_result) 之间
-	messages := []anthropic.MessageParam{
-		userText("m0"), userText("m1"), userText("m2"), userText("m3"),
-		userText("m4"),
-		assistantToolUse("tu_x", "bash"), // index 5
-		userToolResult("tu_x", "ok"),     // index 6 —— tail_start 算到这里时应左移
-		userText("m7"),
-		userText("m8"),
-	}
-
-	out := c.reactiveCompact(context.Background(), messages, "req")
-
-	// 验证没有孤儿 tool_result
+	// 配对合法性：任何 user(tool_result) 的前一条必须含 tool_use
 	for i := 1; i < len(out); i++ {
 		if isToolResult(out[i]) && !hasToolUse(out[i-1]) {
 			t.Fatalf("orphan tool_result at index %d", i)
 		}
 	}
-	// tool_result 和它的 tool_use 要么都在，要么都不在
-	foundUse, foundResult := false, false
-	for _, m := range out {
+}
+
+// countToolUseMessages 统计含 tool_use 块的消息条数。
+func countToolUseMessages(msgs []anthropic.MessageParam) int {
+	n := 0
+	for _, m := range msgs {
 		if hasToolUse(m) {
-			foundUse = true
-		}
-		if isToolResult(m) {
-			foundResult = true
+			n++
 		}
 	}
-	if foundUse != foundResult {
-		t.Fatalf("tool_use and tool_result must be kept or dropped together (use=%v, result=%v)", foundUse, foundResult)
+	return n
+}
+
+// ============ Step 3: auto_compact ============
+
+func TestAutoCompactKeepsSummaryTailAndAttachments(t *testing.T) {
+	client := &summaryMockClient{summary: "did step 1, remaining step 2"}
+	c := newTestCompactor(t, client)
+	dir := t.TempDir()
+
+	// 两个已读文件（b.txt 更新，排前面）
+	f1 := filepath.Join(dir, "a.txt")
+	f2 := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(f1, []byte("alpha content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f2, []byte("beta content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := &sessionState{
+		reads:  map[string]readState{},
+		todo:   newTodoManager(),
+		skills: newSkillLoader(dir),
+	}
+	st.reads[f1] = readState{mtime: time.Unix(1000, 0)}
+	st.reads[f2] = readState{mtime: time.Unix(2000, 0)}
+	if _, err := st.todo.update([]todoItem{
+		{Content: "step 1", Status: todoInProgress},
+		{Content: "step 2", Status: todoPending},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st.skills.skills["demo"] = skill{Name: "demo", Content: "demo skill body"}
+	st.skills.loaded = []string{"demo"}
+
+	messages := []anthropic.MessageParam{
+		userText("m0"), userText("m1"), userText("m2"), userText("m3"),
+		assistantToolUse("tu_x", "read_file"),
+		userToolResult("tu_x", "file body"),
+		userText("m6"), userText("m7"),
+	}
+
+	out, err := c.autoCompact(context.Background(), st, messages, "current request")
+	if err != nil {
+		t.Fatalf("autoCompact failed: %v", err)
+	}
+	// 结构：1 摘要 + 3 附件（文件/plan/skills）+ 4 尾部
+	if len(out) != 1+3+autoCompactKeepRecentMsgs {
+		t.Fatalf("expected %d messages, got %d", 1+3+autoCompactKeepRecentMsgs, len(out))
+	}
+
+	first := textOf(t, out[0])
+	for _, want := range []string{
+		"[Compacted]", "pre_compact_tokens=", "Current user request: current request",
+		"did step 1", ".transcripts/transcript-",
+	} {
+		if !strings.Contains(first, want) {
+			t.Errorf("summary message missing %q:\n%.400s", want, first)
+		}
+	}
+	// 附件 1：最近文件（含磁盘当前内容）
+	files := textOf(t, out[1])
+	if !strings.Contains(files, "alpha content") || !strings.Contains(files, "beta content") {
+		t.Errorf("file attachment missing file contents:\n%.300s", files)
+	}
+	if !strings.Contains(files, f2) || !strings.Contains(files, f1) {
+		t.Errorf("file attachment missing paths:\n%.300s", files)
+	}
+	// 附件 2：plan
+	plan := textOf(t, out[2])
+	if !strings.Contains(plan, "Current plan") || !strings.Contains(plan, "step 1") {
+		t.Errorf("plan attachment wrong:\n%.200s", plan)
+	}
+	// 附件 3：skills
+	skills := textOf(t, out[3])
+	if !strings.Contains(skills, "demo skill body") {
+		t.Errorf("skills attachment wrong:\n%.200s", skills)
+	}
+	// 尾部：最近 4 条原样保留
+	for i, want := range messages[4:] {
+		got := out[1+3+i]
+		if len(got.Content) != len(want.Content) {
+			t.Fatalf("tail message %d content length changed", i)
+		}
+	}
+	// 尾部配对合法：assistant(tool_use) 后紧跟其 tool_result
+	if !hasToolUse(out[4]) || !isToolResult(out[5]) {
+		t.Fatal("tool pair must stay together in the tail")
+	}
+}
+
+func TestAutoCompactFailureKeepsHistory(t *testing.T) {
+	c := newTestCompactor(t, &failingMockClient{err: errors.New("network down")})
+	messages := []anthropic.MessageParam{userText("m0"), userText("m1"), userText("m2")}
+
+	out, err := c.autoCompact(context.Background(), nil, messages, "req")
+	if err == nil {
+		t.Fatal("expected error from summarize")
+	}
+	// 失败时历史必须原样保留（绝不把错误串写进历史）
+	if len(out) != len(messages) {
+		t.Fatalf("history must be preserved on failure: got %d messages, want %d", len(out), len(messages))
+	}
+	for i := range messages {
+		if textOf(t, out[i]) != textOf(t, messages[i]) {
+			t.Fatalf("message %d was modified on failure", i)
+		}
+	}
+	// 熔断计数由 prepare 负责（见 TestPrepareFailureKeepsHistoryAndIncrementsFailures）
+}
+
+func TestFormatSummaryStripsAnalysis(t *testing.T) {
+	raw := "<analysis>\ninternal thinking draft\n</analysis>\n<summary>\n1. Primary Request and Intent: do X\n</summary>"
+	out, err := formatSummary(raw)
+	if err != nil {
+		t.Fatalf("formatSummary failed: %v", err)
+	}
+	if strings.Contains(out, "<analysis>") || strings.Contains(out, "internal thinking draft") {
+		t.Fatalf("analysis block must be stripped, got %q", out)
+	}
+	if strings.Contains(out, "<summary>") {
+		t.Fatalf("summary tags must be replaced, got %q", out)
+	}
+	if !strings.HasPrefix(out, "Summary:") || !strings.Contains(out, "do X") {
+		t.Fatalf("unexpected formatted summary: %q", out)
+	}
+	// 空结果视为失败
+	if _, err := formatSummary("<analysis>only draft</analysis>"); err == nil {
+		t.Fatal("empty summary must be an error")
+	}
+}
+
+// ============ reactive_compact ============
+
+func TestReactiveCompactFallbackOnSummaryError(t *testing.T) {
+	c := newTestCompactor(t, &failingMockClient{err: errors.New("boom")})
+	messages := []anthropic.MessageParam{
+		userText("m0"), userText("m1"), userText("m2"),
+		userText("m3"), userText("m4"), userText("m5"), userText("m6"), userText("m7"),
+	}
+
+	out := c.reactiveCompact(context.Background(), messages, "active req")
+
+	// 1 个 marker + 最近 5 条
+	if len(out) != 1+reactiveKeepRecent {
+		t.Fatalf("expected %d messages, got %d", 1+reactiveKeepRecent, len(out))
+	}
+	text := textOf(t, out[0])
+	for _, want := range []string{
+		"[Reactive compact]", "Current user request: active req",
+		"(summary unavailable; see transcript)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("marker missing %q:\n%.400s", want, text)
+		}
+	}
+	// 尾部保留
+	for i := 0; i < reactiveKeepRecent; i++ {
+		if textOf(t, out[1+i]) != textOf(t, messages[3+i]) {
+			t.Fatalf("tail message %d changed", i)
+		}
 	}
 }
 
@@ -340,7 +498,7 @@ func TestReactiveCompactProtectsToolPairs(t *testing.T) {
 func TestPrepareNoOpWhenBelowLimits(t *testing.T) {
 	c := newTestCompactor(t, nil)
 	messages := []anthropic.MessageParam{userText("hello")}
-	out := c.prepare(context.Background(), messages, "req")
+	out := c.prepare(context.Background(), nil, messages, "req")
 	if len(out) != 1 {
 		t.Fatalf("expected no-op, got %d messages", len(out))
 	}
@@ -349,27 +507,47 @@ func TestPrepareNoOpWhenBelowLimits(t *testing.T) {
 	}
 }
 
-func TestPrepareTriggersCompactHistoryWhenOverLimit(t *testing.T) {
+func TestPrepareTriggersAutoCompactOnUsage(t *testing.T) {
 	client := &summaryMockClient{summary: "everything summarized"}
 	c := newTestCompactor(t, client)
+	messages := []anthropic.MessageParam{userText("m0"), userText("m1"), userText("m2")}
+	// 用锚点伪造超过阈值（不再依赖消息体积）
+	c.observeUsage(anthropic.Usage{InputTokens: int64(c.autoCompactThreshold())}, 0)
 
-	// 造一堆"短到不会被 micro_compact 替换"的消息，但总量超 50K
-	messages := make([]anthropic.MessageParam, 0, 40)
-	for i := 0; i < 40; i++ {
-		messages = append(messages, userText(strings.Repeat("x", 2000)))
-	}
+	out := c.prepare(context.Background(), nil, messages, "big request")
 
-	out := c.prepare(context.Background(), messages, "big request")
-
-	// 应触发 compact_history：1 条 [Compacted] 消息
+	// 历史被替换为 1 条 [Compacted]（消息数 < keepRecent，尾部为空）
 	if len(out) != 1 {
 		t.Fatalf("expected 1 compacted message, got %d", len(out))
 	}
-	if !strings.Contains(out[0].Content[0].OfText.Text, "[Compacted]") {
-		t.Fatalf("expected [Compacted] tag, got %q", out[0].Content[0].OfText.Text)
+	if !strings.Contains(textOf(t, out[0]), "[Compacted]") {
+		t.Fatalf("expected [Compacted] tag, got %q", textOf(t, out[0]))
 	}
 	if client.calls != 1 {
 		t.Fatalf("expected 1 summarize call, got %d", client.calls)
+	}
+	if c.consecutiveFailures != 0 {
+		t.Fatalf("success must reset failures, got %d", c.consecutiveFailures)
+	}
+}
+
+func TestPrepareFailureKeepsHistoryAndIncrementsFailures(t *testing.T) {
+	c := newTestCompactor(t, &failingMockClient{err: errors.New("api down")})
+	messages := []anthropic.MessageParam{userText("m0"), userText("m1"), userText("m2")}
+	c.observeUsage(anthropic.Usage{InputTokens: int64(c.autoCompactThreshold())}, 0)
+
+	out := c.prepare(context.Background(), nil, messages, "req")
+
+	if len(out) != len(messages) {
+		t.Fatalf("history must be preserved, got %d messages", len(out))
+	}
+	for i := range messages {
+		if textOf(t, out[i]) != textOf(t, messages[i]) {
+			t.Fatalf("message %d modified on failed compact", i)
+		}
+	}
+	if c.consecutiveFailures != 1 {
+		t.Fatalf("consecutiveFailures = %d, want 1", c.consecutiveFailures)
 	}
 }
 
@@ -383,22 +561,6 @@ func TestCompactHandlerReturnsMarker(t *testing.T) {
 }
 
 // ============ 辅助函数 ============
-
-func TestUnseenToolResultPositions(t *testing.T) {
-	messages := []anthropic.MessageParam{
-		userText("q"),
-		userToolResult("tu_a", "old"),    // 已消费
-		assistantToolUse("tu_b", "bash"), // assistant 截断点
-		userToolResult("tu_b", "new"),    // 未消费
-	}
-	unseen := unseenToolResultPositions(messages)
-	if len(unseen) != 1 {
-		t.Fatalf("expected 1 unseen, got %d", len(unseen))
-	}
-	if !unseen[[2]int{3, 0}] {
-		t.Fatalf("expected (3,0) to be unseen, got %v", unseen)
-	}
-}
 
 func TestTruncateRunes(t *testing.T) {
 	if got := truncateRunes("hello", 10); got != "hello" {

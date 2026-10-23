@@ -27,8 +27,8 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		// s11: 每轮模型调用前收集已完成的后台任务，以 <task_notification> 注入对话。
 		// 已完成的任务不会主动唤醒 Agent，只在 loop 转起来时被收集。
 		messages = injectBackgroundResults(messages)
-		// s08: 每轮模型调用前先跑压缩流水线；只在超预算时才真正动手
-		messages = cpt.prepare(ctx, messages, activeRequest)
+		// s08: 每轮模型调用前先跑压缩流水线；只在超预算/空闲/超窗口时才真正动手
+		messages = cpt.prepare(ctx, st, messages, activeRequest)
 		// 覆盖写入完整快照：先落用户输入（及历史），收到响应后再加上模型回答。
 		logMessages(turn, messages)
 		appLog.Info("llm request", "turn", turn, "messages", len(messages))
@@ -60,6 +60,9 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 			"stop_reason", resp.StopReason, "input_tokens", resp.Usage.InputTokens,
 			"output_tokens", resp.Usage.OutputTokens, "tool_uses", toolUses)
 
+		// s08: 记录官方 usage 作为 tokenCount 锚点（resp.ToParam() 会丢 usage，
+		// 必须在 append 响应之前单独记账）
+		cpt.observeUsage(resp.Usage, len(messages))
 		messages = append(messages, resp.ToParam())
 		// 模型回答（含 tool_use）写入同一份快照。
 		logMessages(turn, messages)
@@ -152,9 +155,16 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		// tool_result 写入后再次覆盖，保证快照始终是最完整的当前对话。
 		logMessages(turn, messages)
 
-		// s08: 模型请求 compact 时，在整个 batch 的 tool_result 都进 messages 之后再压缩
+		// s08: 模型请求 compact 时，在整个 batch 的 tool_result 都进 messages 之后再压缩；
+		// 失败只打印（历史原样保留），不注入错误串
 		if compactRequested {
-			messages = cpt.compactHistory(ctx, messages, activeRequest)
+			out, err := cpt.compactHistory(ctx, st, messages, activeRequest)
+			if err != nil {
+				appLog.Error("compact failed", "err", err)
+				fmt.Printf("[compact failed: %v]\n", err)
+			} else {
+				messages = out
+			}
 		}
 	}
 }

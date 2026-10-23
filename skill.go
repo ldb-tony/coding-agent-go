@@ -32,6 +32,7 @@ type skill struct {
 type skillLoader struct {
 	skillsDir string
 	skills    map[string]skill
+	loaded    []string // 按首次 load 顺序记录已加载技能（去重），压缩后重建附件用
 }
 
 func newSkillLoader(skillsDir string) *skillLoader {
@@ -118,6 +119,7 @@ func (l *skillLoader) catalog() string {
 // 未命中返回带可用清单的短错误，供模型自我纠正。
 func (l *skillLoader) load(name string) string {
 	if s, ok := l.skills[name]; ok {
+		l.recordLoaded(name)
 		return s.Content
 	}
 	available := "none"
@@ -125,6 +127,33 @@ func (l *skillLoader) load(name string) string {
 		available = strings.Join(names, ", ")
 	}
 	return fmt.Sprintf("Error: Unknown skill '%s'. Available: %s", name, available)
+}
+
+// recordLoaded 记录首次加载的技能名（去重、保持顺序）。
+func (l *skillLoader) recordLoaded(name string) {
+	for _, n := range l.loaded {
+		if n == name {
+			return
+		}
+	}
+	l.loaded = append(l.loaded, name)
+}
+
+// loadedSkill 是已加载技能的正文条目（压缩附件用）。
+type loadedSkill struct {
+	Name    string
+	Content string
+}
+
+// loadedContents 按首次 load 顺序返回已加载技能的正文（顺序稳定）。
+func (l *skillLoader) loadedContents() []loadedSkill {
+	out := make([]loadedSkill, 0, len(l.loaded))
+	for _, name := range l.loaded {
+		if s, ok := l.skills[name]; ok {
+			out = append(out, loadedSkill{Name: name, Content: s.Content})
+		}
+	}
+	return out
 }
 
 func (l *skillLoader) sortNames() []string {

@@ -80,8 +80,6 @@ func executeToolBatch(
 	// 阶段 2：贪心分组，将未被拦截的 tool_use 按资源冲突关系分组
 	groups := greedyGroup(toolUses, blocked)
 
-	// 记录 batch 级日志
-	batchStart := time.Now()
 	var hasUnsafe bool
 	for _, group := range groups {
 		if group.hasUnsafe {
@@ -97,19 +95,9 @@ func executeToolBatch(
 	// 阶段 3：按组执行，组间串行，组内并发
 	sem := make(chan struct{}, maxToolConcurrency) // 信号量限制并发上限
 	for i, group := range groups {
-		groupStart := time.Now()
+		_ = i // 保留索引以备将来需要
 		executeGroup(ctx, st, group, sem, toolUses, blocked, results, outputs, indexMap)
-		appLog.Info("tool batch group",
-			"group_index", i,
-			"group_size", len(group.tools),
-			"has_unsafe", group.hasUnsafe,
-			"ms", time.Since(groupStart).Milliseconds())
 	}
-
-	appLog.Info("tool batch done",
-		"total_tools", len(toolUses),
-		"groups", len(groups),
-		"ms", time.Since(batchStart).Milliseconds())
 
 	// 阶段 4：在主 goroutine 串行执行 PostToolUse hook 和终端打印
 	for i, tu := range toolUses {
@@ -360,11 +348,13 @@ func executeToolWithRecover(ctx context.Context, st *sessionState, name string, 
 	start := time.Now()
 	if shouldRunBackground(name, input) {
 		output = startBackgroundTask(input)
-		appLog.Info("tool exec", "tool", name, "background", true, "ms", time.Since(start).Milliseconds(), "output_runes", len([]rune(output)))
+		appLog.Info("tool exec", "tool", name, "background", true, "ms", time.Since(start).Milliseconds(),
+			"input", truncateForLog(string(input)), "output", truncateForLog(output))
 	} else {
 		// 调用工具
 		output = runTool(st, name, input)
-		appLog.Info("tool exec", "tool", name, "background", false, "ms", time.Since(start).Milliseconds(), "output_runes", len([]rune(output)))
+		appLog.Info("tool exec", "tool", name, "background", false, "ms", time.Since(start).Milliseconds(),
+			"input", truncateForLog(string(input)), "output", truncateForLog(output))
 	}
 	return output
 }

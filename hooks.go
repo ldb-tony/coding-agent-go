@@ -81,6 +81,7 @@ func registerBuiltinHooks() {
 // contextInjectHook 是 UserPromptSubmit hook：进入 LLM 前记录当前工作目录。
 func contextInjectHook(*hookContext) *string {
 	fmt.Printf("\033[90m[HOOK] UserPromptSubmit: working in %s\033[0m\n", workdir)
+	appLog.Info("hook", "event", "UserPromptSubmit", "workdir", workdir)
 	return nil
 }
 
@@ -97,6 +98,7 @@ func permissionHook(hc *hookContext) *string {
 // logHook 是 PreToolUse hook：记录每一次工具调用（原先写在 loop 里的回显迁移到这里）。
 func logHook(hc *hookContext) *string {
 	fmt.Printf("\033[90m[HOOK] %s(%s)\033[0m\n", hc.ToolName, previewArgs(hc.Input))
+	appLog.Info("hook", "event", "PreToolUse", "tool", hc.ToolName, "input", truncateForLog(string(hc.Input)))
 	return nil
 }
 
@@ -108,13 +110,16 @@ const largeOutputRunes = 40000
 func largeOutputHook(hc *hookContext) *string {
 	if n := len([]rune(hc.Output)); n > largeOutputRunes {
 		fmt.Printf("\033[33m[HOOK] Large output from %s: %d chars\033[0m\n", hc.ToolName, n)
+		appLog.Warn("hook", "event", "PostToolUse", "tool", hc.ToolName, "output_chars", n)
 	}
 	return nil
 }
 
 // summaryHook 是 Stop hook：loop 即将退出时打印本次会话的工具调用次数。
 func summaryHook(hc *hookContext) *string {
-	fmt.Printf("\033[90m[HOOK] Stop: session used %d tool calls\033[0m\n", countToolResults(hc.Messages))
+	toolCalls := countToolResults(hc.Messages)
+	fmt.Printf("\033[90m[HOOK] Stop: session used %d tool calls\033[0m\n", toolCalls)
+	appLog.Info("hook", "event", "Stop", "tool_calls", toolCalls)
 	return nil
 }
 

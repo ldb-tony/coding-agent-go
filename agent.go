@@ -23,7 +23,9 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		messages = cpt.prepare(ctx, st, messages, activeRequest)
 		// 覆盖写入完整快照：先落用户输入（及历史），收到响应后再加上模型回答。
 		logMessages(turn, systemPrompt(st), messages)
-		appLog.Info("llm request", "turn", turn, "messages", len(messages))
+
+		// 打印本轮对话摘要（system prompt + 最后一条 user message）
+		logTurnSummary(turn, "request", systemPrompt(st), messages)
 
 		sendStart := time.Now()
 		resp, err := client.Send(ctx, systemPrompt(st), messages, assembleToolPool(st), 8000)
@@ -55,6 +57,9 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		messages = append(messages, resp.ToParam())
 		// 模型回答（含 tool_use）写入同一份快照。
 		logMessages(turn, systemPrompt(st), messages)
+
+		// 打印模型回答摘要
+		logModelResponse(turn, resp)
 
 		var results []anthropic.ContentBlockParamUnion
 		usedTodoThisRound := false

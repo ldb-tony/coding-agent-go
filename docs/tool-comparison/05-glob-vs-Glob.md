@@ -121,7 +121,7 @@ if len(matches) > 200 {
 
 - Glob 是 CC 权限矩阵中工作目录内**免确认**的只读工具，但 deny 的路径模式直接从结果中过滤——与 Grep 共享同一套 `getFileReadIgnorePatterns`，文件名也不能泄露秘密目录的存在。
 - 工具显式声明 read-only/concurrency-safe，调度器可安全并行（模型一次响应里发多个 Glob 时不需要串行化）。
-- 我们：safePath 在 Glob 中甚至没有用武之地（根固定），结果集无权限过滤；[agent.go](file:///Users/tony/coding-agent-go/agent.go#L24-L49) 对多个工具调用本就按顺序逐个执行，当前没有并行调度，所以并发契约暂时不紧迫，但未来并行化时会需要。
+- 我们：safePath 在 Glob 中甚至没有用武之地（根固定），结果集无权限过滤；[scheduler.go](file:///Users/tony/coding-agent-go/scheduler.go) 通过路径感知调度器实现并发：glob 被标记为 concurrencySafe=true，可与同响应内无冲突的只读调用（read_file / grep / 其他 glob）并发执行；与写操作（write_file / edit_file / bash）或同路径的读写冲突时，调度器自动串行化。
 
 ## 7. 效果对比（量化场景推演，估算）
 

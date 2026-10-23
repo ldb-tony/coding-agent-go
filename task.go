@@ -58,27 +58,23 @@ func runSubagent(st *sessionState, prompt string) string {
 		messages = append(messages, resp.ToParam())
 
 		var results []anthropic.ContentBlockParamUnion
-		for _, block := range resp.Content {
-			if block.Type != "tool_use" {
-				continue
-			}
-			// 与父相同的权限/hook：PreToolUse 返回非 nil 即拦截本次调用。
-			hc := &hookContext{ToolName: block.Name, Input: block.Input}
-			if blocked := triggerHooks(EventPreToolUse, hc); blocked != nil {
-				results = append(results, anthropic.NewToolResultBlock(block.ID, *blocked, true))
-				continue
-			}
-			// s11: 子代理与父共用同一套工具分发，run_in_background 的 bash 同样转后台。
-			var output string
-			if shouldRunBackground(block.Name, block.Input) {
-				output = startBackgroundTask(block.Input)
-			} else {
-				output = runTool(st, block.Name, block.Input)
-			}
-			hc.Output = output
-			triggerHooks(EventPostToolUse, hc)
-			results = append(results, anthropic.NewToolResultBlock(block.ID, output, false))
-		}
+		// 使用 executeToolBatch 执行工具批次，支持路径感知并发调度
+		results = executeToolBatch(
+			st.ctx,
+			st,
+			resp.Content,
+			func(hc *hookContext) *string {
+				// PreToolUse hook：与父相同的权限/hook
+				if blocked := triggerHooks(EventPreToolUse, hc); blocked != nil {
+					return blocked
+				}
+				return nil
+			},
+			func(hc *hookContext) {
+				// PostToolUse hook
+				triggerHooks(EventPostToolUse, hc)
+			},
+		)
 
 		// 没有任何 tool_use：本轮就是最终答复，返回文本。
 		if len(results) == 0 {

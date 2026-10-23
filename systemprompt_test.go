@@ -137,3 +137,34 @@ func TestSystemPromptMCPInstructions(t *testing.T) {
 		t.Errorf("MCP servers should be sorted by name:\n%s", prompt)
 	}
 }
+
+// TestSystemPromptConcurrencySemantics 验证并发语义描述已更新，旧的串行表述已移除。
+func TestSystemPromptConcurrencySemantics(t *testing.T) {
+	setupWorkdir(t)
+	prompt := systemPrompt(newSessionState())
+
+	// 旧的串行表述应该已移除
+	for _, forbidden := range []string{
+		"executed in order, one after another",
+		"Batched calls are executed in order",
+		"do not rely on them running concurrently",
+	} {
+		if strings.Contains(prompt, forbidden) {
+			t.Errorf("prompt still contains old serial execution description %q:\n%s", forbidden, prompt)
+		}
+	}
+
+	// 新的并发/保序表述应该存在
+	for _, want := range []string{
+		"read_file / glob / grep",
+		"concurrently",
+		"write_file / edit_file / bash",
+		"do not overlap",
+		"in the order they were issued",
+		"Results are always returned in the order",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing new concurrency semantics %q:\n%s", want, prompt)
+		}
+	}
+}

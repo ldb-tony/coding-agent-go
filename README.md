@@ -81,7 +81,7 @@ var toolHandlers = map[string]toolHandler{
 }
 ```
 
-**设计原因**：loop 不认识任何具体工具，只做查表分发（`runTool`），因此新增工具完全不需要动 loop。同一轮响应里多个 tool_use 严格按模型返回顺序串行执行——模型可能依赖前一个工具的副作用（如先 write 再 read）。
+**设计原因**：loop 不认识任何具体工具，只做查表分发（`runTool`），因此新增工具完全不需要动 loop。同一轮响应里多个 tool_use 通过路径感知调度器（`scheduler.go`）执行：独立的只读调用（read_file / glob / grep）可并发；写操作（write_file / edit_file / bash 等）独占串行；读写同一资源的调用按发出顺序执行——模型可能依赖前一个工具的副作用（如先 write 再 read）。结果始终按模型返回顺序回填。
 
 ### 文件工具与路径安全
 

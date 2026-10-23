@@ -404,7 +404,7 @@ func TestAgentLoopDispatchesFileTool(t *testing.T) {
 	}
 }
 
-// TestAllToolsRegistered 防止新增工具时漏注册 schema（allTools 与 toolHandlers 必须一一对应）。
+// TestAllToolsRegistered 防止新增工具时漏注册 schema（allTools 与 toolRegistry 必须一一对应）。
 func TestAllToolsRegistered(t *testing.T) {
 	tools := allTools()
 	want := []string{"bash", "read_file", "write_file", "edit_file", "glob", "grep", "todo_write", "load_skill", "task", "compact",
@@ -419,8 +419,8 @@ func TestAllToolsRegistered(t *testing.T) {
 		if tools[i].OfTool.Name != name {
 			t.Errorf("tools[%d] = %q, want %q", i, tools[i].OfTool.Name, name)
 		}
-		if _, ok := toolHandlers[name]; !ok {
-			t.Errorf("tool %q defined in allTools but missing in toolHandlers", name)
+		if _, ok := toolRegistry[name]; !ok {
+			t.Errorf("tool %q defined in allTools but missing in toolRegistry", name)
 		}
 		// s14: 静态工具名禁止占用 mcp__ 前缀（会遮蔽 MCP fallback 分发）
 		if strings.HasPrefix(name, "mcp__") {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -168,6 +169,57 @@ func TestAgentLoopParallelToolUse(t *testing.T) {
 	}
 
 	want := []string{"one", "two"}
+	for i, res := range results {
+		found := false
+		for _, c := range res.Content {
+			if c.OfText != nil && strings.Contains(c.OfText.Text, want[i]) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("tool_result %d: expected content to contain %q", i, want[i])
+		}
+	}
+}
+
+// TestAgentLoopConcurrentReads 验证多个 read_file 调用可以并发执行。
+func TestAgentLoopConcurrentReads(t *testing.T) {
+	setupLogPaths(t)
+	dir := setupWorkdir(t)
+
+	// 创建两个测试文件
+	for _, name := range []string{"test_read_a.txt", "test_read_b.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("content of "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 模型返回两个 read_file 调用
+	concurrentResp := mustMessage(t, `{"id":"msg_concurrent","type":"message","role":"assistant","model":"mock","content":[{"type":"tool_use","id":"toolu_read_a","name":"read_file","input":{"path":"test_read_a.txt"}},{"type":"tool_use","id":"toolu_read_b","name":"read_file","input":{"path":"test_read_b.txt"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
+	client := &mockClient{responses: []*anthropic.Message{concurrentResp, textResponse(t)}}
+	initial := []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("read both files")),
+	}
+
+	messages, err := agentLoop(context.Background(), client, initial, "test request")
+	if err != nil {
+		t.Fatalf("agentLoop: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("expected 2 Send calls, got %d", client.calls)
+	}
+
+	// 验证两个 read_file 都被执行，结果正确
+	results := toolResultTexts(t, messages[2])
+	if len(results) != 2 {
+		t.Fatalf("expected 2 tool_result blocks, got %d", len(results))
+	}
+	if results[0].ToolUseID != "toolu_read_a" || results[1].ToolUseID != "toolu_read_b" {
+		t.Fatalf("unexpected tool_use_ids: %q, %q", results[0].ToolUseID, results[1].ToolUseID)
+	}
+
+	// 验证结果按原顺序返回
+	want := []string{"content of test_read_a.txt", "content of test_read_b.txt"}
 	for i, res := range results {
 		found := false
 		for _, c := range res.Content {

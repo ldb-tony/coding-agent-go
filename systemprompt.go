@@ -95,7 +95,7 @@ func promptUsingTools() string {
    - To search file contents use grep instead of running grep or rg through bash.
    - Reserve bash for system commands and terminal operations that genuinely require a shell.
  - Use todo_write to break multi-step work into ordered items and keep the list current. Mark an item completed as soon as it is done.
- - You can emit multiple tool calls in one response. Independent calls may be batched in a single response; calls whose arguments depend on earlier results must be sequential. Batched calls are executed in order, one after another, so do not rely on them running concurrently.`
+ - You can emit multiple tool calls in one response. Independent read-only calls (read_file / glob / grep) within the same response are executed concurrently; write calls (write_file / edit_file / bash / etc.) do not overlap with each other; read-write calls to the same resource are executed in the order they were issued. Results are always returned in the order they were issued. Calls whose arguments depend on earlier results must still be sequential — concurrency does not change dependency semantics.`
 }
 
 func promptTone() string {

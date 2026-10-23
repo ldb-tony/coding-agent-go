@@ -70,6 +70,7 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 		var results []anthropic.ContentBlockParamUnion
 		usedTodoThisRound := false
 		compactRequested := false
+		// 统计 usedTodoThisRound 和 compactRequested（在调度前完成）
 		for _, block := range resp.Content {
 			if block.Type != "tool_use" {
 				continue
@@ -83,43 +84,26 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 			if block.Name == "compact" {
 				compactRequested = true
 			}
-
-			hc := &hookContext{ToolName: block.Name, Input: block.Input}
-
-			// s04：权限校验、调用日志等扩展逻辑从 loop 里移出，改由 PreToolUse hook 决定。
-			// hook 返回非 nil 表示拦截本次工具调用，返回值作为 tool_result 回喂模型。
-			if blocked := triggerHooks(EventPreToolUse, hc); blocked != nil {
-				appLog.Warn("tool blocked by hook", "turn", turn, "tool", block.Name, "reason", *blocked)
-				fmt.Println(*blocked)
-				results = append(results, anthropic.NewToolResultBlock(block.ID, *blocked, true))
-				continue
-			}
-
-			// 唯一的改动点：从硬编码 runBash 变成分发查找。
-			// s11: run_in_background 的 bash 调用交给后台 goroutine，本轮先返回带
-			// bg_id 的占位结果，让 loop 继续处理后续工具调用与下一轮。
-			var output string
-			background := shouldRunBackground(block.Name, block.Input)
-			toolStart := time.Now()
-			if background {
-				output = startBackgroundTask(block.Input)
-			} else {
-				output = runTool(st, block.Name, block.Input)
-			}
-			appLog.Info("tool exec", "turn", turn, "tool", block.Name, "background", background,
-				"ms", time.Since(toolStart).Milliseconds(), "output_runes", len([]rune(output)))
-			if runes := []rune(output); len(runes) > 200 {
-				fmt.Println(string(runes[:200]))
-			} else {
-				fmt.Println(output)
-			}
-
-			// s04：执行之后的副作用/输出检查走 PostToolUse（返回值不影响控制流）。
-			hc.Output = output
-			triggerHooks(EventPostToolUse, hc)
-
-			results = append(results, anthropic.NewToolResultBlock(block.ID, output, false))
 		}
+
+		// 使用 executeToolBatch 执行工具批次，支持路径感知并发调度
+		results = executeToolBatch(
+			ctx,
+			st,
+			resp.Content,
+			func(hc *hookContext) *string {
+				// PreToolUse hook：权限校验、调用日志等
+				if blocked := triggerHooks(EventPreToolUse, hc); blocked != nil {
+					appLog.Warn("tool blocked by hook", "turn", turn, "tool", hc.ToolName, "reason", *blocked)
+					return blocked
+				}
+				return nil
+			},
+			func(hc *hookContext) {
+				// PostToolUse hook：执行之后的副作用/输出检查
+				triggerHooks(EventPostToolUse, hc)
+			},
+		)
 
 		if len(results) == 0 {
 			// s04：loop 即将退出时触发 Stop；返回非 nil 则注入消息并继续循环。

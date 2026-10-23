@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -78,6 +79,7 @@ type readState struct {
 // sessionState 是会话级状态，挂在 agentLoop 上而不是全局变量。
 type sessionState struct {
 	reads            map[string]readState // absPath -> 最近一次成功读取
+	readsMu          sync.Mutex           // 保护 reads map 的并发访问
 	todo             *todoManager         // s05: 会话级待办列表
 	tasks            *taskStore           // s10: .tasks/ 持久化任务图（跨会话）
 	skills           *skillLoader         // s07: 会话启动时扫描出的技能注册表
@@ -122,39 +124,175 @@ func safePath(path string) (string, error) {
 // toolHandler 接收会话状态与模型给出的原始 JSON 参数，返回工具结果文本。
 type toolHandler func(st *sessionState, args json.RawMessage) string
 
-// TOOL_HANDLERS：工具名 → 处理函数。加一个工具 = 这里加一行映射。
-var toolHandlers = map[string]toolHandler{
-	"bash":       bashHandler,
-	"read_file":  readHandler,
-	"write_file": writeHandler,
-	"edit_file":  editHandler,
-	"glob":       globHandler,
-	"grep":       grepHandler,
-	"todo_write": todoWriteHandler, // s05: 待办规划
-	"load_skill": loadSkillHandler, // s07: 技能按需加载
-	"compact":    compactHandler,   // s08: 请求历史压缩（实际压缩在 batch 结束后由 loop 触发）
-	// s10: 持久化任务图 —— 建图两阶段：先 create_task 拿 ID，再 update_task 加边
-	"create_task":   createTaskHandler,
-	"update_task":   updateTaskHandler,
-	"claim_task":    claimTaskHandler,
-	"complete_task": completeTaskHandler,
-	"get_task":      getTaskHandler,
-	"list_tasks":    listTaskHandler,
-	// s14: MCP 外部工具连接
-	"connect_mcp": connectMCPHandler,
+// resourceSet 表示工具调用涉及的资源集合，用于路径感知调度。
+type resourceSet struct {
+	reads  []string // 读资源路径列表（已规范化）
+	writes []string // 写资源路径列表（已规范化）
+	global bool     // 是否为全局资源（bash/task/MCP 等无法静态分析的工具）
 }
 
+// toolSpec 是工具的内部元数据，包含处理器、并发安全性和资源函数。
+// concurrencySafe 和 resources 只用于调度，绝不写入 Anthropic tool schema。
+type toolSpec struct {
+	handler         toolHandler
+	concurrencySafe bool // 是否可并发执行（默认 false，只对显式声明的只读工具置 true）
+	resources       func(args json.RawMessage) resourceSet // 返回工具调用涉及的资源集合
+}
+
+// toolRegistry：工具名 → 内部元数据。取代原有的 toolHandlers map，
+// 将 handler / 并发元数据 / 资源函数合为单一注册表，避免三处漂移。
+var toolRegistry = map[string]*toolSpec{}
+
 // task 的处理器在 init 里注册：taskHandler 经 runSubagent 复用 runTool，而 runTool
-// 读取 toolHandlers —— 若在 map 字面量里直接引用 taskHandler，会构成包级初始化循环
+// 读取 toolRegistry —— 若在 map 字面量里直接引用 taskHandler，会构成包级初始化循环
 // （initialization cycle）。init 阶段赋值可打破该循环。
 func init() {
-	toolHandlers["task"] = taskHandler
+	// 注册所有工具到 toolRegistry，包含并发元数据和资源函数
+	toolRegistry["bash"] = &toolSpec{
+		handler:         bashHandler,
+		concurrencySafe: false, // bash 是 global，无法静态分析
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["read_file"] = &toolSpec{
+		handler:         readHandler,
+		concurrencySafe: true, // 只读，无共享副作用
+		resources: func(args json.RawMessage) resourceSet {
+			var in struct {
+				Path string `json:"path"`
+			}
+			_ = json.Unmarshal(args, &in)
+			if abs, err := safePath(in.Path); err == nil {
+				return resourceSet{reads: []string{abs}}
+			}
+			return resourceSet{global: true} // 路径越界，保守为 global
+		},
+	}
+	toolRegistry["write_file"] = &toolSpec{
+		handler:         writeHandler,
+		concurrencySafe: false, // 写操作，独占
+		resources: func(args json.RawMessage) resourceSet {
+			var in struct {
+				Path string `json:"path"`
+			}
+			_ = json.Unmarshal(args, &in)
+			if abs, err := safePath(in.Path); err == nil {
+				return resourceSet{writes: []string{abs}}
+			}
+			return resourceSet{global: true}
+		},
+	}
+	toolRegistry["edit_file"] = &toolSpec{
+		handler:         editHandler,
+		concurrencySafe: false, // 写操作，独占
+		resources: func(args json.RawMessage) resourceSet {
+			var in struct {
+				Path string `json:"path"`
+			}
+			_ = json.Unmarshal(args, &in)
+			if abs, err := safePath(in.Path); err == nil {
+				return resourceSet{writes: []string{abs}}
+			}
+			return resourceSet{global: true}
+		},
+	}
+	toolRegistry["glob"] = &toolSpec{
+		handler:         globHandler,
+		concurrencySafe: true, // 只读搜索
+		resources: func(args json.RawMessage) resourceSet {
+			var in struct {
+				Path string `json:"path"`
+			}
+			_ = json.Unmarshal(args, &in)
+			searchRoot := in.Path
+			if searchRoot == "" {
+				searchRoot = workdir
+			}
+			if abs, err := safePath(searchRoot); err == nil {
+				return resourceSet{reads: []string{abs}}
+			}
+			return resourceSet{global: true}
+		},
+	}
+	toolRegistry["grep"] = &toolSpec{
+		handler:         grepHandler,
+		concurrencySafe: true, // 只读搜索
+		resources: func(args json.RawMessage) resourceSet {
+			var in struct {
+				Path string `json:"path"`
+			}
+			_ = json.Unmarshal(args, &in)
+			searchRoot := in.Path
+			if searchRoot == "" {
+				searchRoot = workdir
+			}
+			if abs, err := safePath(searchRoot); err == nil {
+				return resourceSet{reads: []string{abs}}
+			}
+			return resourceSet{global: true}
+		},
+	}
+	toolRegistry["todo_write"] = &toolSpec{
+		handler:         todoWriteHandler,
+		concurrencySafe: false, // 涉及会话状态，保守为 unsafe
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["load_skill"] = &toolSpec{
+		handler:         loadSkillHandler,
+		concurrencySafe: false, // 涉及磁盘读取与惰性加载，保守为 unsafe
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["compact"] = &toolSpec{
+		handler:         compactHandler,
+		concurrencySafe: false, // 标记位操作，保守为 unsafe
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["create_task"] = &toolSpec{
+		handler:         createTaskHandler,
+		concurrencySafe: false, // 任务图操作，保守为 unsafe
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["update_task"] = &toolSpec{
+		handler:         updateTaskHandler,
+		concurrencySafe: false,
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["claim_task"] = &toolSpec{
+		handler:         claimTaskHandler,
+		concurrencySafe: false,
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["complete_task"] = &toolSpec{
+		handler:         completeTaskHandler,
+		concurrencySafe: false,
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["get_task"] = &toolSpec{
+		handler:         getTaskHandler,
+		concurrencySafe: false, // 涉及磁盘读取，保守为 unsafe
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["list_tasks"] = &toolSpec{
+		handler:         listTaskHandler,
+		concurrencySafe: false, // 涉及磁盘读取，保守为 unsafe
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	toolRegistry["connect_mcp"] = &toolSpec{
+		handler:         connectMCPHandler,
+		concurrencySafe: false, // MCP 连接操作，保守为 unsafe
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
+	// task 工具单独注册，避免包级初始化循环
+	toolRegistry["task"] = &toolSpec{
+		handler:         taskHandler,
+		concurrencySafe: false, // 子代理是 global
+		resources:       func(_ json.RawMessage) resourceSet { return resourceSet{global: true} },
+	}
 }
 
 func runTool(st *sessionState, name string, input json.RawMessage) string {
-	handler, ok := toolHandlers[name]
+	spec, ok := toolRegistry[name]
 	if ok {
-		return handler(st, input)
+		return spec.handler(st, input)
 	}
 	// s14: MCP 外部工具 fallback —— connect_mcp 注册的动态工具不在静态 map 里
 	if isMCPTool(name) {
@@ -345,12 +483,15 @@ func runRead(st *sessionState, path string, offset int, limit *int) string {
 	// mtime 去重：同一文件、同一区间、mtime 未变 → 返回约 30 token 的 stub。
 	// 区间不同（例如翻页）不命中，保证 offset 分页永远拿得到内容。
 	if st != nil {
+		st.readsMu.Lock()
 		if prev, ok := st.reads[abs]; ok &&
 			prev.mtime.Equal(info.ModTime()) &&
 			prev.start == start && prev.end == end && prev.fullView == fullView {
+			st.readsMu.Unlock()
 			return fileUnchangedStub
 		}
 		st.reads[abs] = readState{mtime: info.ModTime(), start: start, end: end, fullView: fullView}
+		st.readsMu.Unlock()
 	}
 	return output
 }
@@ -379,7 +520,9 @@ func checkWritable(st *sessionState, abs, path string) (os.FileMode, error) {
 	}
 	perm := fi.Mode().Perm()
 	if st != nil {
+		st.readsMu.Lock()
 		last, ok := st.reads[abs]
+		st.readsMu.Unlock()
 		if !ok || !last.fullView {
 			return perm, fmt.Errorf("%s has not been read yet. Read it first before writing to it.", path)
 		}
@@ -404,7 +547,9 @@ func (st *sessionState) markWritten(abs, content string) {
 	if trimmed := strings.TrimRight(content, "\n"); trimmed != "" {
 		start, end = 1, len(strings.Split(trimmed, "\n"))
 	}
+	st.readsMu.Lock()
 	st.reads[abs] = readState{mtime: fi.ModTime(), start: start, end: end, fullView: true}
+	st.readsMu.Unlock()
 }
 
 // runWrite 全量覆写文件。内容强制以 LF 行尾落盘，消除 CRLF 噪音 diff；
@@ -699,7 +844,8 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 				"use offset (1-based starting line) and limit (line count) to page through large files. "+
 				"Files over 256KB require explicit offset/limit. A page exceeding the output budget "+
 				"returns a short error telling you where to continue — retry with smaller limit/offset; "+
-				"content is never silently truncated. Re-reading an unchanged range returns a short notice.",
+				"content is never silently truncated. Re-reading an unchanged range returns a short notice. "+
+				"May run concurrently with other non-conflicting read-only calls in the same response.",
 			map[string]any{
 				"path":   map[string]string{"type": "string"},
 				"offset": map[string]string{"type": "integer", "description": "1-based line number to start reading from. Only provide for large files."},
@@ -710,7 +856,8 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 			"Write content to a file, overwriting it entirely. If the file already exists, you must "+
 				"have read it with read_file first (a full read; a partial page does not count), and the "+
 				"file must not have changed since that read — otherwise the write is refused and you must "+
-				"read it again. Creating a new file needs no prior read. Content is always written with LF line endings.",
+				"read it again. Creating a new file needs no prior read. Content is always written with LF line endings. "+
+				"Reads to the same path are serialized relative to this write.",
 			map[string]any{
 				"path":    map[string]string{"type": "string"},
 				"content": map[string]string{"type": "string"},
@@ -722,7 +869,8 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 				"the file: provide a larger string with more surrounding context to make it unique, or set "+
 				"replace_all=true to change every occurrence (useful for renaming a variable, for instance). "+
 				"The file must have been fully read with read_file earlier in the conversation and must not "+
-				"have changed since that read, otherwise the edit is refused and you must read it again.",
+				"have changed since that read, otherwise the edit is refused and you must read it again. "+
+				"Reads to the same path are serialized relative to this edit.",
 			map[string]any{
 				"path":        map[string]string{"type": "string"},
 				"old_text":    map[string]string{"type": "string"},
@@ -732,7 +880,8 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 			[]string{"path", "old_text", "new_text"}),
 		tool("glob",
 			"Find files by pattern. Respects .gitignore. "+
-				"Supports ** for recursive matching. Results are relative to the search root.",
+				"Supports ** for recursive matching. Results are relative to the search root. "+
+				"May run concurrently with other non-conflicting read-only calls in the same response.",
 			map[string]any{
 				"pattern": map[string]string{"type": "string", "description": "Glob pattern (e.g. '**/*.go', 'src/*.tsx')"},
 				"path":    map[string]string{"type": "string", "description": "Directory to search in (default: workspace root)"},
@@ -743,7 +892,8 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 				"Three output modes: files_with_matches (default, fast — just lists files), "+
 				"content (shows matching lines with numbers), count (files:hit count). "+
 				"Use glob to filter filenames, e.g. glob='*.py' or glob='**/*.go'. "+
-				"Use head_limit/offset to page through large result sets.",
+				"Use head_limit/offset to page through large result sets. "+
+				"May run concurrently with other non-conflicting read-only calls in the same response.",
 			map[string]any{
 				"pattern":     map[string]string{"type": "string", "description": "Regex pattern to search for"},
 				"path":        map[string]string{"type": "string", "description": "Directory or file to search in (default: workspace root)"},

@@ -135,7 +135,7 @@
 
 参考稿按 Claude Code 工具名（Read/Write/Edit/Glob/Grep/Bash/TaskCreate）描述优先级；本项目工具名是 `read_file` / `write_file` / `edit_file` / `glob` / `grep` / `bash` / `todo_write`，直接照抄会让模型调用不存在的工具。本次全部改写为本项目真实名称，并新增测试禁止 prompt 出现 `AskUserQuestion`、`TodoWrite`、`TaskCreate`、`Skill tool`、`! <command>` 等无支撑文案。
 
-另有一处能力差异必须在 prompt 中如实表达：参考稿鼓励并行工具调用；本项目 `agent.go` 按顺序串行执行同一响应内的多个 `tool_use`。因此文案写成“可在一次响应中发多个独立调用，但执行按顺序进行；有依赖时必须串行”，不承诺并行加速。
+另有一处能力差异必须在 prompt 中如实表达：参考稿鼓励并行工具调用；本项目通过 [scheduler.go](file:///Users/tony/coding-agent-go/scheduler.go) 的路径感知调度器实现有条件并发：独立的只读调用（read_file / glob / grep）可并发执行；写操作（write_file / edit_file / bash 等）独占串行；读写同一资源的调用按发出顺序执行。因此文案写成“独立只读调用会并发；写类调用不会重叠；读写同一资源按发出顺序执行；结果按发出顺序返回；有依赖的调用仍要串行”，如实反映并发语义。
 
 ### 5.4 记忆语义
 

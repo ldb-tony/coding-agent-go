@@ -16,6 +16,9 @@ import (
 
 var messagesLogPath = "messages.json"
 
+// subMessagesLogPath 子代理（subagent）的对话日志路径，格式与主代理相同。
+var subMessagesLogPath = "messages-sub.json"
+
 // readlineHistoryPath readline 命令历史文件（↑↓ 翻页、跨进程保留）。
 var readlineHistoryPath = ".coding-agent-history"
 
@@ -102,16 +105,40 @@ func levelName(l slog.Level) string {
 
 func resetLogs() error {
 	// 快照日志：每次调用覆盖写入，启动时置空对象即可。
-	return os.WriteFile(messagesLogPath, []byte("{}"), 0o644)
+	if err := os.WriteFile(messagesLogPath, []byte("{}"), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(subMessagesLogPath, []byte("{}"), 0o644)
 }
 
-// logMessages 覆盖写入当前完整会话快照：用户输入、模型回答、tool_use/tool_result。
-// react 模式下 messages 本身已包含全部历史，覆盖而非追加可避免历史重复。
-func logMessages(turn int, messages []anthropic.MessageParam) {
+// logMessages 覆盖写入主代理的完整会话快照到 messagesLogPath。
+func logMessages(turn int, systemPrompt string, messages []anthropic.MessageParam) {
+	writeMessagesLog(messagesLogPath, turn, systemPrompt, messages)
+}
+
+// logSubMessages 覆盖写入子代理的完整会话快照到 subMessagesLogPath。
+func logSubMessages(turn int, systemPrompt string, messages []anthropic.MessageParam) {
+	writeMessagesLog(subMessagesLogPath, turn, systemPrompt, messages)
+}
+
+// writeMessagesLog 覆盖写入当前完整会话快照：system prompt（作为 role=system 消息）+
+// 用户输入 + 模型回答 + tool_use/tool_result。react 模式下 messages 本身已包含
+// 全部历史，覆盖而非追加可避免历史重复。
+func writeMessagesLog(path string, turn int, systemPrompt string, messages []anthropic.MessageParam) {
+	// 将 system prompt 作为第一条消息前置，保证日志是模型的完整输入。
+	fullMessages := make([]anthropic.MessageParam, 0, 1+len(messages))
+	if systemPrompt != "" {
+		fullMessages = append(fullMessages, anthropic.MessageParam{
+			Role:    anthropic.MessageParamRoleSystem,
+			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(systemPrompt)},
+		})
+	}
+	fullMessages = append(fullMessages, messages...)
+
 	entry := map[string]any{
 		"ts":       time.Now().UTC().Format(time.RFC3339Nano),
 		"turn":     turn,
-		"messages": messages,
+		"messages": fullMessages,
 	}
 
 	// SDK 的 tool_use input 是 json.RawMessage（API 响应原文，服务端含 &<>
@@ -136,7 +163,7 @@ func logMessages(turn int, messages []anthropic.MessageParam) {
 		fmt.Fprintf(os.Stderr, "warning: log messages: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(messagesLogPath, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: log messages: %v\n", err)
 	}
 }

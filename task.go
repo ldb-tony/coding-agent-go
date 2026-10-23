@@ -7,7 +7,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// s06: 子代理（subagent）——给子任务一份全新的 messages[]，只把最终文本带回父对话。
+// 子代理（subagent）——给子任务一份全新的 messages[]，只把最终文本带回父对话。
 //
 // 与参考实现一致：子代理与父同进程、同 WORKDIR，复用同一套工具、权限与生命周期
 // hook；它没有 task 工具（本课只允许一层委派）；父只收到它的最终文本，中间的
@@ -26,9 +26,9 @@ const subSystemPrompt = "You are a subagent working on a single delegated task. 
 	"Use the provided tools to complete it, then reply with a concise final summary " +
 	"of what you found or did. Act, don't explain."
 
-// subTools 返回子代理可用的工具：与父相同的工具池，但不含 task（只允许一层委派）。
+// subTools 返回子代理可用的工具：与父相同的工具池，但不包含 task（只允许一层委派）。
 // 对齐参考实现的 SUB_TOOLS = BASE_TOOLS（去掉 task）。
-// s14: 每轮重算，子代理 connect_mcp 后下一轮也能看到新 MCP 工具（与父 loop 行为一致）。
+// 每轮重算，子代理 connect_mcp 后下一轮也能看到新 MCP 工具（与父 loop 行为一致）。
 func subTools(st *sessionState) []anthropic.ToolUnionParam {
 	all := assembleToolPool(st)
 	out := make([]anthropic.ToolUnionParam, 0, len(all))
@@ -51,11 +51,13 @@ func runSubagent(st *sessionState, prompt string) string {
 
 	for turn := 0; turn < subagentMaxTurns; turn++ {
 		tools := subTools(st)
+		logSubMessages(turn, subSystemPrompt, messages)
 		resp, err := st.client.Send(st.ctx, subSystemPrompt, messages, tools, subagentMaxTokens)
 		if err != nil {
 			return "Error: subagent failed: " + err.Error()
 		}
 		messages = append(messages, resp.ToParam())
+		logSubMessages(turn, subSystemPrompt, messages)
 
 		var results []anthropic.ContentBlockParamUnion
 		// 使用 executeToolBatch 执行工具批次，支持路径感知并发调度
@@ -81,6 +83,7 @@ func runSubagent(st *sessionState, prompt string) string {
 			return subagentText(resp.Content)
 		}
 		messages = append(messages, anthropic.NewUserMessage(results...))
+		logSubMessages(turn, subSystemPrompt, messages)
 	}
 
 	return "Subagent stopped after 30 turns without a final answer."

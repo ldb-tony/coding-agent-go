@@ -63,9 +63,12 @@ func executeToolBatch(
 	outputs := make([]string, len(toolUses))
 	// 记录被 hook 拦截的调用，不参与调度
 	blocked := make([]bool, len(toolUses))
+	// 建立原始 blocks 下标到 toolUses 位置索引的映射
+	indexMap := make(map[int]int, len(toolUses))
 
 	// 阶段 1：在主 goroutine 串行执行 PreToolUse hook，拦截的调用标记为 blocked
 	for i, tu := range toolUses {
+		indexMap[tu.index] = i
 		hc := &hookContext{ToolName: tu.block.Name, Input: tu.block.Input}
 		if blockedMsg := triggerPreHook(hc); blockedMsg != nil {
 			blocked[i] = true
@@ -95,7 +98,7 @@ func executeToolBatch(
 	sem := make(chan struct{}, maxToolConcurrency) // 信号量限制并发上限
 	for i, group := range groups {
 		groupStart := time.Now()
-		executeGroup(ctx, st, group, sem, toolUses, blocked, results, outputs)
+		executeGroup(ctx, st, group, sem, toolUses, blocked, results, outputs, indexMap)
 		appLog.Info("tool batch group",
 			"group_index", i,
 			"group_size", len(group.tools),
@@ -306,6 +309,7 @@ func executeGroup(
 	blocked []bool,
 	results []anthropic.ContentBlockParamUnion,
 	outputs []string,
+	indexMap map[int]int,
 ) {
 	var wg sync.WaitGroup
 	for _, tu := range group.tools {
@@ -319,15 +323,17 @@ func executeGroup(
 				defer func() { <-sem }()
 			case <-ctx.Done():
 				// ctx 已取消，未启动的调用产出 "canceled" 结果
-				results[tu.index] = anthropic.NewToolResultBlock(tu.block.ID, "Error: canceled", true)
-				outputs[tu.index] = "Error: canceled"
+				pos := indexMap[tu.index]
+				results[pos] = anthropic.NewToolResultBlock(tu.block.ID, "Error: canceled", true)
+				outputs[pos] = "Error: canceled"
 				return
 			}
 
 			// 执行工具，recover panic
 			output := executeToolWithRecover(ctx, st, tu.block.Name, tu.block.Input)
-			outputs[tu.index] = output
-			results[tu.index] = anthropic.NewToolResultBlock(tu.block.ID, output, false)
+			pos := indexMap[tu.index]
+			outputs[pos] = output
+			results[pos] = anthropic.NewToolResultBlock(tu.block.ID, output, false)
 		}(tu)
 	}
 	wg.Wait()

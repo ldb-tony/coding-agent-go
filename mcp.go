@@ -1,4 +1,4 @@
-// mcp.go 实现 s14 的 MCP (Model Context Protocol) harness 层能力:
+// mcp.go 实现 MCP (Model Context Protocol) harness 层能力:
 // 连接外部服务、发现工具、将发现的工具注入 agent loop 供 LLM 调用。
 //
 // 本实现为教学版: 服务端以进程内 mock server 形式提供 tools/list 与 tools/call 边界，

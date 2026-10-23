@@ -1,4 +1,4 @@
-// compact.go 实现 s08 的上下文压缩流水线（对齐 Claude Code 的设计）：
+// compact.go 实现上下文压缩流水线（对齐 Claude Code 的设计）：
 // 每轮模型调用前按固定顺序执行，成本与信息损失递增：
 //
 //	Step 1 tool_result_budget — 当轮 tool_result 合计超预算时，把单条超大结果

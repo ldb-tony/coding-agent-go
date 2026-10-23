@@ -231,7 +231,7 @@ func runBashWithCwd(command, shellCwd string) (output string, newCwd string) {
 	return raw, shellCwd
 }
 
-// shellCommand 构造跨平台的 shell 命令（同步 bash 与 s11 后台任务共用）。
+// shellCommand 构造跨平台的 shell 命令（同步 bash 与后台任务共用）。
 func shellCommand(ctx context.Context, command string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
 		return exec.CommandContext(ctx, "cmd", "/C", command)

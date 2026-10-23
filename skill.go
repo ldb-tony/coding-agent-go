@@ -10,16 +10,6 @@ import (
 	"unicode/utf8"
 )
 
-// s07: Skill Loading —— 知识按需加载。
-//
-// system prompt 里只放技能目录（name + description），`load_skill(name)` 被调用时
-// 才把整份 SKILL.md 作为 tool_result 拼进消息列表。对齐参考实现的两级表：
-//
-//	| 内容                      | 进入模型的位置 | 时机            |
-//	|--------------------------|--------------|----------------|
-//	| Skill name + description | system prompt | 扫描时（会话启动） |
-//	| 全文 SKILL.md             | tool_result   | load_skill 调用时 |
-
 // skill 是扫描结果中的一条技能：目录条目 + 全文。
 type skill struct {
 	Name        string

@@ -1,4 +1,4 @@
-// mcp_test.go 覆盖 s14 MCP harness 层能力：
+// mcp_test.go 覆盖 MCP harness 层能力：
 // 工具名规范化 / 注册表连接与碰撞 / 工具池动态合并 / runTool 分发 / host-side 权限策略 / loop 级端到端。
 package main
 

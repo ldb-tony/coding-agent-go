@@ -217,7 +217,7 @@ token 计数以 **API usage 为锚点**（`observeUsage` 记录上次响应的�
 
 ### MCP 外部工具连接
 
-[MCP（Model Context Protocol）](https://modelcontextprotocol.io/) 让 Agent 在运行时发现并调用外部服务提供的工具，而不是把所有工具写死在 `tools.go` 里。本项目实现的是 **s14 教学版**：服务端以进程内 mock server 形式存在（docs + deploy 两个示例），真实 MCP 传输层（stdio/SSE）通过实现 `MCPServer` 接口即可接入。
+[MCP（Model Context Protocol）](https://modelcontextprotocol.io/) 让 Agent 在运行时发现并调用外部服务提供的工具，而不是把所有工具写死在 `tools.go` 里。本项目实现的是 **教学版**：服务端以进程内 mock server 形式存在（docs + deploy 两个示例），真实 MCP 传输层（stdio/SSE）通过实现 `MCPServer` 接口即可接入。
 
 核心组件：
 

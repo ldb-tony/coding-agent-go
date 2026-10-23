@@ -13,7 +13,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// setMemoryEnabled 显式切换 s09 记忆总开关并注册恢复。
+// setMemoryEnabled 显式切换记忆总开关并注册恢复。
 // 既有 loop 级测试在 setupLogPaths 里统一关闭；需要记忆行为的测试用它打开。
 func setMemoryEnabled(t *testing.T, v bool) {
 	t.Helper()

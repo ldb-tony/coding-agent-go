@@ -47,21 +47,19 @@ func main() {
 		if rl != nil {
 			rl.Close() // 先还原终端，readline 持有 raw 模式
 		}
-		backgroundTasks.stopAll() // s11: 退出前清理仍在运行的后台任务进程组
+		backgroundTasks.stopAll() // 退出前清理仍在运行的后台任务进程组
 		os.Exit(0)
 	}()
 
 	fmt.Println("coding-agent-go — teaching coding agent")
 	fmt.Printf("Conversation logged to %s\n", messagesLogPath)
+	fmt.Printf("Sub-agent conversations logged to %s\n", subMessagesLogPath)
 	fmt.Println("Enter a question, press Enter to send. Type q to quit.")
 	fmt.Println()
 
 	client := newAnthropicClient()
 	var history []anthropic.MessageParam
 
-	// s13+: 使用 readline 替代 bufio.Scanner，进入 raw 模式自行处理行编辑。
-	// readline 按 rune 计算宽度并重绘，从根本上解决 macOS canonical 模式
-	// 下 UTF-8 宽字符退格擦除不彻底的鬼影问题；附带获得命令历史和光标编辑能力。
 	var err error
 	rl, err = readline.NewEx(&readline.Config{
 		Prompt:      "\033[36magent >> \033[0m",
@@ -95,11 +93,8 @@ func main() {
 		}
 
 		appLog.Info("user query", "query", query)
-		// s04：用户输入之后、进入 LLM 之前触发 UserPromptSubmit（上下文注入/输入校验）。
 		triggerHooks(EventUserPromptSubmit, &hookContext{Query: query})
 		history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(query)))
-		// s08: activeRequest 显式传给 loop —— tool_result 也是 role=user，
-		// compact 时无法从历史里区分"当前用户请求"与"工具返回"
 		history, err = agentLoop(context.Background(), client, history, query)
 		if err != nil {
 			appLog.Error("agent loop failed", "err", err)
@@ -119,5 +114,5 @@ func main() {
 	}
 
 	appLog.Info("process exit")
-	backgroundTasks.stopAll() // s11: 正常退出（q/EOF）前清理仍在运行的后台任务进程组
+	backgroundTasks.stopAll() // 正常退出（q/EOF）前清理仍在运行的后台任务进程组
 }

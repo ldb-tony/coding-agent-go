@@ -90,6 +90,7 @@ func TestSubToolsExcludesTask(t *testing.T) {
 // TestRunSubagentFreshContextAndFinalText 验证：子代理从全新 messages 开始（不含父历史），
 // 工具调用走共享 runTool（能读到共享 WORKDIR 的文件），最终返回文本。
 func TestRunSubagentFreshContextAndFinalText(t *testing.T) {
+	setupLogPaths(t)
 	dir := setupWorkdir(t)
 	mustWrite(t, dir, "hello.txt", "hello from subagent file")
 
@@ -145,6 +146,7 @@ func TestRunSubagentFreshContextAndFinalText(t *testing.T) {
 
 // TestRunSubagentNoToolUseReturnsImmediately 无 tool_use 的首轮即为最终答复。
 func TestRunSubagentNoToolUseReturnsImmediately(t *testing.T) {
+	setupLogPaths(t)
 	client := &subClient{responses: []*anthropic.Message{textMessage(t, "Just an answer.")}}
 	st := newSubState(client)
 
@@ -158,6 +160,7 @@ func TestRunSubagentNoToolUseReturnsImmediately(t *testing.T) {
 
 // TestRunSubagentEmptyTextFallsBack 无文本时返回 "(no summary)"。
 func TestRunSubagentEmptyTextFallsBack(t *testing.T) {
+	setupLogPaths(t)
 	client := &subClient{responses: []*anthropic.Message{textMessage(t, "   ")}}
 	st := newSubState(client)
 
@@ -168,6 +171,7 @@ func TestRunSubagentEmptyTextFallsBack(t *testing.T) {
 
 // TestRunSubagentTurnCap 始终返回 tool_use 时，达到 30 轮上限返回固定文本。
 func TestRunSubagentTurnCap(t *testing.T) {
+	setupLogPaths(t)
 	dir := setupWorkdir(t)
 	mustWrite(t, dir, "hello.txt", "hi")
 
@@ -206,6 +210,7 @@ func TestTaskHandlerArgs(t *testing.T) {
 	}
 
 	t.Run("valid prompt dispatches through runTool", func(t *testing.T) {
+		setupLogPaths(t)
 		client := &subClient{responses: []*anthropic.Message{textMessage(t, "delegated result")}}
 		st := newSubState(client)
 		got := runTool(st, taskToolName, json.RawMessage(`{"prompt":"do it"}`))

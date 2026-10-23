@@ -80,27 +80,26 @@ type readState struct {
 type sessionState struct {
 	reads            map[string]readState // absPath -> 最近一次成功读取
 	readsMu          sync.Mutex           // 保护 reads map 的并发访问
-	todo             *todoManager         // s05: 会话级待办列表
-	tasks            *taskStore           // s10: .tasks/ 持久化任务图（跨会话）
-	skills           *skillLoader         // s07: 会话启动时扫描出的技能注册表
-	memory           *memoryStore         // s09: 跨会话记忆存储（.memory/）
-	recalledMemories string               // s09: 会话开始时召回的相关记忆全文（进 system prompt）
-	client           LLMClient            // s06: 子代理的嵌套 loop 复用父的 LLM 客户端
-	ctx              context.Context      // s06: 子代理继承父 loop 的 context（超时/取消）
-	shellCwd         string               // s12: bash cwd 持久化（跨调用保持工作目录）
-	mcp              *mcpRegistry         // s14: 已连接 MCP 服务注册表（首次 connect_mcp 时初始化）
+	todo             *todoManager         // 会话级待办列表
+	tasks            *taskStore           // .tasks/ 持久化任务图（跨会话）
+	skills           *skillLoader         // 会话启动时扫描出的技能注册表
+	memory           *memoryStore         // 跨会话记忆存储（.memory/）
+	recalledMemories string               // 会话开始时召回的相关记忆全文（进 system prompt）
+	client           LLMClient            // 子代理的嵌套 loop 复用父的 LLM 客户端
+	ctx              context.Context      // 子代理继承父 loop 的 context（超时/取消）
+	shellCwd         string               // bash cwd 持久化（跨调用保持工作目录）
+	mcp              *mcpRegistry         // 已连接 MCP 服务注册表（首次 connect_mcp 时初始化）
 }
 
 func newSessionState() *sessionState {
-	// s07：技能目录在会话启动时扫描一次，之后 load_skill 只查内存注册表。
 	skills := newSkillLoader(filepath.Join(workdir, "skills"))
 	skills.scan()
 	return &sessionState{
 		reads:  map[string]readState{},
 		todo:   newTodoManager(),
-		tasks:  newTaskStore(filepath.Join(workdir, tasksDirName)), // s10: 任务目录随 workdir
+		tasks:  newTaskStore(filepath.Join(workdir, tasksDirName)), // 任务目录随 workdir
 		skills: skills,
-		memory: newMemoryStore(filepath.Join(workdir, memoryDirName)), // s09: 记忆目录随 workdir
+		memory: newMemoryStore(filepath.Join(workdir, memoryDirName)), // 记忆目录随 workdir
 	}
 }
 
@@ -294,7 +293,7 @@ func runTool(st *sessionState, name string, input json.RawMessage) string {
 	if ok {
 		return spec.handler(st, input)
 	}
-	// s14: MCP 外部工具 fallback —— connect_mcp 注册的动态工具不在静态 map 里
+	// MCP 外部工具 fallback —— connect_mcp 注册的动态工具不在静态 map 里
 	if isMCPTool(name) {
 		if st.mcp == nil {
 			return "MCP error: no MCP servers connected — call connect_mcp first"
@@ -813,7 +812,7 @@ func matchSegs(pat, name []string) bool {
 }
 
 // assembleToolPool 每轮 LLM 调用前组装工具池：基础工具 + 已连接 MCP 服务发现的工具。
-// s14: 由静态 allTools() 改为接受 sessionState，动态合并 MCP 工具（connect_mcp 之后下一轮生效）。
+// 由静态 allTools() 改为接受 sessionState，动态合并 MCP 工具（connect_mcp 之后下一轮生效）。
 func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 	tool := func(name, desc string, props map[string]any, required []string) anthropic.ToolUnionParam {
 		t := anthropic.ToolParam{
@@ -941,7 +940,7 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 				"batch completes, so other tool calls in the same response still execute first.",
 			map[string]any{},
 			[]string{}),
-		// s10: 持久化任务图。建图两阶段：先创建全部节点拿到 ID，再用 update_task 加边
+		// 持久化任务图。建图两阶段：先创建全部节点拿到 ID，再用 update_task 加边
 		//（同一响应里的兄弟调用无法引用彼此新生成的 ID）。
 		tool("create_task",
 			"Create a persistent task record in .tasks/ that survives across sessions. "+
@@ -987,7 +986,7 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 			"List one-line summaries of all persisted tasks (id, status, subject, owner, dependencies).",
 			map[string]any{},
 			[]string{}),
-		// s14: MCP 外部服务连接工具 —— bring-in 外部工具的入口
+		// MCP 外部服务连接工具 —— bring-in 外部工具的入口
 		tool("connect_mcp",
 			"Connect to an external MCP (Model Context Protocol) server to discover and use additional tools. "+
 				"After connecting, the new tools (prefixed mcp__{server}__...) become available starting the next turn. "+
@@ -997,7 +996,7 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 			},
 			[]string{"name"}),
 	}
-	// s14: 追加已连接 MCP 服务发现的工具（命名 mcp__{server}__{tool}）
+	// 追加已连接 MCP 服务发现的工具（命名 mcp__{server}__{tool}）
 	if st != nil && st.mcp != nil {
 		mcpDefs, _ := st.mcp.assembleToolDefs()
 		tools = append(tools, mcpDefs...)

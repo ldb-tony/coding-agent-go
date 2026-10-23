@@ -1,6 +1,6 @@
 //go:build windows
 
-// s11: Windows 没有 POSIX 进程组语义，走默认行为（Context 取消时只杀直接子进程）。
+// Windows 没有 POSIX 进程组语义，走默认行为（Context 取消时只杀直接子进程）。
 package main
 
 import (

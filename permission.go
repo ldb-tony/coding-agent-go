@@ -1,4 +1,4 @@
-// permission.go 实现 s03 的三闸门权限管线:硬拒清单 → 规则匹配 → 用户确认。
+// permission.go 实现三闸门权限管线:硬拒清单 → 规则匹配 → 用户确认。
 package main
 
 import (
@@ -92,7 +92,7 @@ func askUser(toolName string, args json.RawMessage, reason string) bool {
 
 // checkPermission 按固定顺序过三道门：硬拒 → 规则+询问 → 直通。
 func checkPermission(toolName string, args json.RawMessage) bool {
-	// s14: MCP 外部工具走独立的 host-side 策略（server 自称的 readOnlyHint 不可信）
+	// MCP 外部工具走独立的 host-side 策略（server 自称的 readOnlyHint 不可信）
 	if isMCPTool(toolName) {
 		server, safeTool, ok := parseMCPName(toolName)
 		if !ok {

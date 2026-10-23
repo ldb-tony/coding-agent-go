@@ -422,7 +422,7 @@ func TestAllToolsRegistered(t *testing.T) {
 		if _, ok := toolRegistry[name]; !ok {
 			t.Errorf("tool %q defined in allTools but missing in toolRegistry", name)
 		}
-		// s14: 静态工具名禁止占用 mcp__ 前缀（会遮蔽 MCP fallback 分发）
+		// 静态工具名禁止占用 mcp__ 前缀（会遮蔽 MCP fallback 分发）
 		if strings.HasPrefix(name, "mcp__") {
 			t.Errorf("static tool %q must not use reserved mcp__ prefix", name)
 		}

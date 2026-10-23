@@ -1,4 +1,4 @@
-// hooks.go 实现 s04 的 hook 机制：把扩展逻辑挂在 agent loop 的关键节点上，
+// hooks.go 实现 hook 机制：把扩展逻辑挂在 agent loop 的关键节点上，
 // 而不是写进 loop 里。四个事件覆盖一次完整的 agent 周期：
 //
 //	UserPromptSubmit — 用户输入之后、进入 LLM 之前（输入校验、上下文注入）
@@ -68,7 +68,7 @@ func triggerHooks(event HookEvent, hc *hookContext) *string {
 
 func init() { registerBuiltinHooks() }
 
-// registerBuiltinHooks 挂载 s04 参考实现里的五个示例 hook：权限校验（s03 逻辑迁移至此）、
+// registerBuiltinHooks 挂载参考实现里的五个示例 hook：权限校验、
 // 调用日志、大输出提醒、上下文注入、退出汇总。抽成函数是为了让测试能重建一套干净注册表。
 func registerBuiltinHooks() {
 	registerHook(EventUserPromptSubmit, contextInjectHook)
@@ -84,7 +84,7 @@ func contextInjectHook(*hookContext) *string {
 	return nil
 }
 
-// permissionHook 是 PreToolUse hook：s03 的 checkPermission 逻辑迁移到这里。
+// permissionHook 是 PreToolUse hook：三闸门权限校验逻辑。
 // 三闸门任意一关拒绝时返回拒绝信息，从而拦截本次工具调用。
 func permissionHook(hc *hookContext) *string {
 	if checkPermission(hc.ToolName, hc.Input) {

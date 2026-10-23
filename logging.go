@@ -231,7 +231,7 @@ func logModelResponse(turn int, resp *anthropic.Message) {
 	var thinkingContent string
 	var textContent string
 	var toolCalls []string
-	
+
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "thinking":
@@ -242,7 +242,7 @@ func logModelResponse(turn int, resp *anthropic.Message) {
 			toolCalls = append(toolCalls, fmt.Sprintf("%s(%s)", block.Name, truncateForLog(string(block.Input))))
 		}
 	}
-	
+
 	// 记录完整的模型回答，包括思考、文本和工具调用
 	if thinkingContent != "" {
 		appLog.Info("model response",

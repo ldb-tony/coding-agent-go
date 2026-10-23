@@ -41,10 +41,10 @@ type ToolDef struct {
 
 // MCPClient 持有一个已发现的 MCP 服务及其工具列表。
 type MCPClient struct {
-	server   MCPServer
+	server     MCPServer
 	serverName string            // 注册时的 server 名 (规范化后, 用于 mcp__{server}__{tool} 前缀)
-	tools    []ToolDef          // 发现的工具定义
-	origNames map[string]string // safeName → 原始 server-side 名 (CallTool 时回查)
+	tools      []ToolDef         // 发现的工具定义
+	origNames  map[string]string // safeName → 原始 server-side 名 (CallTool 时回查)
 }
 
 // newMCPClient 从一个 MCPServer 发现全部工具并构建客户端。

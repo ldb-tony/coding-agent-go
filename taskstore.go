@@ -49,8 +49,8 @@ type Task struct {
 	Subject     string     `json:"subject"`
 	Description string     `json:"description"`
 	Status      taskStatus `json:"status"`
-	Owner       *string    `json:"owner"`      // 未认领时为 null
-	BlockedBy   []string   `json:"blockedBy"`  // 依赖的任务 ID；建图分两阶段，创建时为空列表
+	Owner       *string    `json:"owner"`     // 未认领时为 null
+	BlockedBy   []string   `json:"blockedBy"` // 依赖的任务 ID；建图分两阶段，创建时为空列表
 }
 
 // taskStore 管理 .tasks/ 目录：每条任务一个 JSON 文件，跨会话恢复。

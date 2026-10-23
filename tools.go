@@ -134,7 +134,7 @@ type resourceSet struct {
 // concurrencySafe 和 resources 只用于调度，绝不写入 Anthropic tool schema。
 type toolSpec struct {
 	handler         toolHandler
-	concurrencySafe bool // 是否可并发执行（默认 false，只对显式声明的只读工具置 true）
+	concurrencySafe bool                                   // 是否可并发执行（默认 false，只对显式声明的只读工具置 true）
 	resources       func(args json.RawMessage) resourceSet // 返回工具调用涉及的资源集合
 }
 

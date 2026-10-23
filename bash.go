@@ -26,7 +26,7 @@ const (
 // 映射表 key = 命令 basename，value = isError 判断函数（exitCode → (isError, note)）。
 // 只有返回 isError=false 的情况会用 note 替换标准错误信息。
 var exitCodeSemantics = map[string]func(int) (bool, string){
-	"grep": exitCodeNoMatch1,
+	"grep":  exitCodeNoMatch1,
 	"egrep": exitCodeNoMatch1,
 	"fgrep": exitCodeNoMatch1,
 	"rg":    exitCodeNoMatch1,
@@ -173,10 +173,10 @@ func saveBashOverflow(content string) (string, error) {
 }
 
 // runBashWithCwd 是面向 handler 的 cwd 持久化入口：
-//   1) 用 shellCwd 包壳（cd <shellCwd> && ...）
-//   2) 在命令末尾附加 pwd marker（同时携带原始退出码）用于同步
-//   3) 执行后从输出解析 marker，用原始 command 名做退出码语义化
-//   4) 返回 (干净输出, 新 cwd)
+//  1. 用 shellCwd 包壳（cd <shellCwd> && ...）
+//  2. 在命令末尾附加 pwd marker（同时携带原始退出码）用于同步
+//  3. 执行后从输出解析 marker，用原始 command 名做退出码语义化
+//  4. 返回 (干净输出, 新 cwd)
 //
 // shellCwd 为空时：跳过包壳。command 和 echo marker 必须在同一 shell 层。
 func runBashWithCwd(command, shellCwd string) (output string, newCwd string) {

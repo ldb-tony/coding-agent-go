@@ -51,7 +51,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	fmt.Println("s04: Hooks")
+	fmt.Println("coding-agent-go — teaching coding agent")
 	fmt.Printf("Conversation logged to %s\n", messagesLogPath)
 	fmt.Println("Enter a question, press Enter to send. Type q to quit.")
 	fmt.Println()
@@ -64,7 +64,7 @@ func main() {
 	// 下 UTF-8 宽字符退格擦除不彻底的鬼影问题；附带获得命令历史和光标编辑能力。
 	var err error
 	rl, err = readline.NewEx(&readline.Config{
-		Prompt:      "\033[36ms04 >> \033[0m",
+		Prompt:      "\033[36magent >> \033[0m",
 		HistoryFile: readlineHistoryPath,
 	})
 	if err != nil {

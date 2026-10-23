@@ -13,7 +13,7 @@
 // 与旧版（按 50 条消息硬切 snip、按 50K JSON 字节触发）的差异：
 //   - 计数以 API usage 为锚点、粗估增量（tokenCount），阈值与真实窗口对齐
 //   - microcompact 只在空闲期触发（收益是缩小下轮全量重写，而非保护缓存——
-//     本项目未启用 cache_control，见 docs/compact-gap-analysis.md）
+//     本项目未启用 cache_control）
 //   - auto-compact 失败不再把错误串写进历史，连续 3 次失败熔断
 //
 // 另有 reactive_compact：API 直接返回 prompt_too_long 时兜底，保留最近 5 条，

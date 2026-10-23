@@ -20,3 +20,8 @@ coding-agent-go
 !.gitignore
 !.env.example
 !.trae/
+
+# 设计/计划文档与 spec 属于本地工作流产物，不随仓库交付（交付文档仅 README 与代码注释）
+/docs/
+/.trae/documents/
+/.trae/specs/

@@ -681,9 +681,7 @@ func (e *walkerEngine) Glob(pattern, root string) ([]string, error) {
 	return matches, nil
 }
 
-// isUTF8 简单检查 —— 用 utf8.Valid 但已在 tools.go 里有同名函数，这里重导入会有冲突。
-// 简化用 bytes.Equal 的方式... 实际上 tools.go 已经 import "unicode/utf8"，
-// 但 search.go 不需要。让我们在 walkerEngine 里直接用标准库。
+// isUTF8 报告字节串是否为合法 UTF-8；walker 引擎据此跳过二进制文件。
 func isUTF8(data []byte) bool {
 	return utf8.Valid(data)
 }

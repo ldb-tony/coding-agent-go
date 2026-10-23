@@ -3,11 +3,29 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 )
+
+// commaTokens 将整数格式化为千分位形式，如 12345 -> "12,345"，用于 token 用量展示。
+func commaTokens(v int64) string {
+	s := strconv.FormatInt(v, 10)
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign, s = "-", s[1:]
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte(s[i])
+	}
+	return sign + b.String()
+}
 
 func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.MessageParam, activeRequest string) ([]anthropic.MessageParam, error) {
 	// 会话级状态：read_file 的 mtime 去重（及后续 read-before-write 门控）挂在这里。
@@ -18,6 +36,7 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 	st.recallMemories(activeRequest)
 	roundsSinceTodo := 0
 	reactiveRetries := 0
+	var totalIn, totalOut int64
 	for turn := 0; ; turn++ {
 		messages = injectBackgroundResults(messages)
 		messages = cpt.prepare(ctx, st, messages, activeRequest)
@@ -60,6 +79,14 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 
 		// 打印模型回答摘要
 		logModelResponse(turn, resp)
+
+		// 每轮模型返回后在 stdout 打印 token 用量（当轮 + 会话累计），与 slog 记录一致。
+		totalIn += resp.Usage.InputTokens
+		totalOut += resp.Usage.OutputTokens
+		fmt.Printf("[tokens] in=%s out=%s cache_create=%s cache_read=%s | Σ in=%s out=%s\n",
+			commaTokens(resp.Usage.InputTokens), commaTokens(resp.Usage.OutputTokens),
+			commaTokens(resp.Usage.CacheCreationInputTokens), commaTokens(resp.Usage.CacheReadInputTokens),
+			commaTokens(totalIn), commaTokens(totalOut))
 
 		var results []anthropic.ContentBlockParamUnion
 		usedTodoThisRound := false

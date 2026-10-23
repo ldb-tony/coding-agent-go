@@ -25,3 +25,7 @@ coding-agent-go
 /docs/
 /.trae/documents/
 /.trae/specs/
+
+# Canvas 可视化报告文件（本地展示用，不随仓库交付）
+*.canvas.tsx
+*.canvas.status.json

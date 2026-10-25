@@ -1,6 +1,6 @@
 # coding-agent-go
 
-一个用 Go 实现的、教学取向的 Coding Agent：REPL + Agent Loop + 16 个工具，覆盖权限、Hook、上下文压缩、子代理、技能加载、跨会话记忆、持久化任务图与后台任务等完整机制。模型层使用 Anthropic Messages API（兼容任何 Anthropic 协议的端点）。
+一个用 Go 实现的、教学取向的 Coding Agent：REPL + Agent Loop + 17 个内置工具（另有 `web_search` / `web_fetch` 两个服务端工具），覆盖权限、Hook、上下文压缩、子代理、技能加载、跨会话记忆、持久化任务图与后台任务等完整机制。模型层使用 Anthropic Messages API（兼容任何 Anthropic 协议的端点）。
 
 ## 快速开始
 
@@ -34,7 +34,7 @@ go run .
 go build -o coding-agent-go && ./coding-agent-go
 ```
 
-启动后进入 REPL：输入问题回车发送，`q` / `exit` / 空行 / Ctrl-D 退出，Ctrl-C 安全退出（自动清理后台任务进程组）。
+启动后进入 REPL：输入问题回车发送，`q` / `exit` / Ctrl-D 退出（空行仅重新提示，不退出），Ctrl-C 安全退出（自动清理后台任务进程组）。
 
 ### 4. 运行测试
 
@@ -53,7 +53,7 @@ go test ./...
 - [Bash 工具](#bash-工具) — 超时控制、输出截断、退出码语义化、cwd 跨调用持久化
 - [三闸门权限管线](#三闸门权限管线) — 硬拒清单 → 规则匹配 → 人工确认
 - [Hook 机制](#hook-机制) — 四个生命周期事件，扩展逻辑挂在外面而不是写进 loop
-- [上下文压缩流水线](#上下文压缩流水线) — usage 锚点计数 + 空闲期微压缩 + 超窗口自动压缩 + 超限额底重试
+- [上下文压缩流水线](#上下文压缩流水线) — usage 锚点计数 + 空闲期微压缩 + 超窗口自动压缩 + 超限额兜底重试
 - [Todo 规划与提醒](#todo-规划与提醒) — 会话内待办清单 + 连续 3 轮未更新自动注入 reminder
 - [子代理（Subagent）](#子代理subagent) — 全新 messages[] 的嵌套 loop，只带回最终文本
 - [技能按需加载](#技能按需加载) — system prompt 只放目录，SKILL.md 全文用时才取
@@ -74,10 +74,14 @@ go test ./...
 工具注册采用"两个声明点"的极简模式（[tools.go](tools.go)）：
 
 ```go
-var toolHandlers = map[string]toolHandler{
-    "bash":      bashHandler,
-    "read_file": readHandler,
-    // ...加一个工具 = 这里加一行映射 + allTools() 里加一条 schema
+var toolRegistry = map[string]*toolSpec{}
+
+func init() {
+    toolRegistry["bash"] = &toolSpec{
+        handler:   bashHandler,
+        resources: func(json.RawMessage) resourceSet { return resourceSet{global: true} },
+    }
+    // ...加一个工具 = init 里注册 handler/调度元数据 + assembleToolPool() 里加一条 schema
 }
 ```
 
@@ -136,15 +140,15 @@ read_file / write_file / edit_file / glob / grep 全部经过 `safePath` 校验�
 
 [compact.go](compact.go) 在**每轮模型调用前**按固定顺序执行三步，外加一个 API 限额底：
 
-1. **tool_result_budget**：当轮 tool_result 合计超 200K 字符时，单条 >30K 的落盘到 `.task_outputs/tool-results/`，上下文里只留 2K 预览
+1. **tool_result_budget**：最新一批 tool_result（最后一条 user message）合计超 200K 字符时，单条 >30K 的落盘到 `.task_outputs/tool-results/`，上下文里只留 2K 预览
 2. **micro_compact（time-based）**：距最后一条 assistant 响应空闲 ≥60 分钟时，把白名单工具（read_file/bash/grep/glob/write_file/edit_file）旧 tool_result 替换为 `[Old tool result content cleared]`，保留最近 5 个；幂等，且只改 content、不动消息结构
-3. **auto_compact**：token 估算达到 167k（200k 窗口 − 20k 摘要预留 − 13k 缓冲）才触发——写归档 → 调模型生成九章节 summary → 组装 `[Compacted]` 摘要消息 + 附件（最近 5 个文件重读 / plan / 已加载 skills）+ 最近 4 条尾部（配对保护）
+3. **auto_compact**：token 计数达到 167k（默认 200k 窗口 − 20k 摘要预留 − 13k 缓冲）才触发——写归档 → 调模型生成九章节 summary → 组装 `[Compacted]` 摘要消息 + 附件（最近 5 个文件重读 / plan / 已加载 skills）+ 最近 4 条尾部（配对保护）。`AUTO_COMPACT_WINDOW` 只能向下覆盖窗口（如 128k 端点），阈值随之降低；摘要调用本身 `max_tokens=8000`
 
-token 计数以 **API usage 为锚点**（`observeUsage` 记录上次响应的官方计数）+ 新增消息粗估（rune 数/4 再 ×4/3 放大）。另有 **reactive_compact**：API 直接返回 `prompt_too_long` 时归档 + 总结 + 保留最近 5 条，最多重试 1 次。
+token 计数以 **API usage 为锚点**（`observeUsage` 记录上次响应的官方计数）+ 新增消息粗估（rune 数/4 再 ×4/3 放大）。另有 **reactive_compact**：API 返回 `prompt_too_long`（或 `too many tokens`）时归档 + 总结 + 保留最近 5 条（配对保护），最多重试 1 次；摘要失败时使用固定兜底文本继续，不把错误串写进历史。
 
-**失败策略**：auto-compact 失败不写任何消息（历史原样保留），连续 3 次失败熔断；手动（`compact` 工具）失败只打印 `[compact failed: ...]`。摘要 prompt 为九章节结构（禁工具前言 + `<analysis>` 草稿块后处理），完整推导见 [docs/compact-gap-analysis.md](docs/compact-gap-analysis.md)。
+**失败策略**：auto-compact 失败不改写消息历史（历史原样保留，transcript 已先归档），连续 3 次失败熔断；手动（`compact` 工具）失败只打印 `[compact failed: ...]`。摘要 prompt 为九章节结构（禁工具前言 + `<analysis>` 草稿块后处理），完整推导见 [docs/compact-gap-analysis.md](docs/compact-gap-analysis.md)。
 
-**设计原因**：顺序按"成本与信息损失"严格递增——Step 1/2 是零 API 成本、低信息损失的确定性操作；只有 Step 3 引入模型调用与不可逆的信息损失，所以它必须发生在真实窗口压力下（167k）而不是"50 条消息"或"50K 字节"这类与窗口脱钩的代理指标上。micro_compact 选在空闲 ≥60 分钟（对齐 prompt cache TTL）触发，收益是缩小下一轮必然发生的全量重写。
+**设计原因**：顺序按"成本与信息损失"严格递增——Step 1/2 是零 API 成本、低信息损失的确定性操作；只有 Step 3 引入模型调用与不可逆的信息损失，所以它必须发生在真实窗口压力下（167k）而不是"50 条消息"或"50K 字节"这类与窗口脱钩的代理指标上。micro_compact 选在空闲 ≥60 分钟（超过 prompt cache TTL，缓存必然失效）触发，收益是缩小下一轮必然发生的全量重写（本项目未启用 `cache_control`，重点不是保护缓存）。
 
 ### Todo 规划与提醒
 
@@ -243,7 +247,8 @@ mcp__docs__search(query="...")  → runTool mcp__ fallback → mcpRegistry.clien
 
 [search.go](search.go) 为 glob/grep 提供统一底座：
 
-- 运行时探测 `rg`（`exec.LookPath`）：有就走 **ripgrepEngine**（快、原生尊重 .gitignore），没有就走 **walkerEngine**（Go 标准库 WalkDir + 自研 gitignore matcher + 自研 `**` 递归 glob——Go 标准库 `filepath.Glob` 不支持 `**`）
+- 运行时探测 `rg`（`exec.LookPath`）：**grep** 有 rg 就走 **ripgrepEngine**（快、原生尊重 .gitignore），没有就走 **walkerEngine**；**glob 始终走 walkerEngine**（rg 的 glob 默认递归，与本项目 `*.py` 只匹配顶层的语义不同）
+- walkerEngine 使用 Go 标准库 WalkDir + 自研 gitignore matcher + 自研 `**` 递归 glob（Go 标准库 `filepath.Glob` 不支持 `**`）
 - 两种引擎共享 gitignoreMatcher 与 VCS 目录排除（.git/.svn/.hg/.jj/...）
 - grep 三种输出模式：`files_with_matches`（默认，先定位文件）/ `content`（带行号）/ `count`
 
@@ -257,10 +262,12 @@ mcp__docs__search(query="...")  → runTool mcp__ fallback → mcpRegistry.clien
 |------|------|
 | [main.go](main.go) | REPL 入口、信号处理、每轮驱动 agentLoop |
 | [agent.go](agent.go) | Agent Loop：压缩流水线调度、后台结果注入、工具批执行、todo reminder |
-| [llm.go](llm.go) | Anthropic 客户端封装、system prompt 拼装 |
-| [tools.go](tools.go) | 基础工具 schema + 分发表 + 文件工具实现 + safePath + assembleToolPool（基础工具 + MCP 动态工具） |
+| [llm.go](llm.go) | Anthropic 客户端封装（`LLMClient` 接口 + `Send`） |
+| [systemprompt.go](systemprompt.go) | system prompt 分块拼装（身份/规则/工具/记忆/MCP/环境等） |
+| [tools.go](tools.go) | 基础工具 schema + 工具注册表 + 文件工具实现 + safePath + assembleToolPool（基础工具 + MCP 动态工具） |
+| [scheduler.go](scheduler.go) | 路径感知的工具批调度（只读并发、写操作串行、结果按模型返回顺序回填） |
 | [bash.go](bash.go) | bash 执行：超时/截断/退出码语义化/cwd 持久化 |
-| [permission.go](permission.go) | 三闸门权限管线 + MCP host-side 策略（allow/confirm/deny） |
+| [permission.go](permission.go) | 三闸门权限管线（MCP 工具按 host-side 策略决定是否进入确认） |
 | [hooks.go](hooks.go) | Hook 事件注册与触发 + 5 个内置 hook |
 | [compact.go](compact.go) | 上下文压缩：usage 锚点计数 + time-based 微压缩 + 自动压缩（附件/尾部/熔断）+ reactive 兜底 |
 | [todo.go](todo.go) | 会话内待办清单 |
@@ -275,7 +282,7 @@ mcp__docs__search(query="...")  → runTool mcp__ fallback → mcpRegistry.clien
 | [mcp_test.go](mcp_test.go) | MCP 单元测试 + loop 级端到端（connect 后下一轮工具池含 mcp__docs__*） |
 | [search.go](search.go) | 搜索引擎抽象：ripgrep 优先 + walker 回退 |
 | [procgroup_unix.go](procgroup_unix.go) / [procgroup_windows.go](procgroup_windows.go) | 平台相关：后台任务的进程组管理 |
-| [logging.go](logging.go) | 每轮完整对话快照覆盖落盘 messages.json |
+| [logging.go](logging.go) | 主/子代理完整对话快照覆盖落盘（messages.json / messages-sub.json）+ 结构化诊断日志 |
 | `*_test.go` | 各模块单元测试（Arrange-Act-Assert） |
 
 ## 运行时的产物目录
@@ -286,5 +293,7 @@ mcp__docs__search(query="...")  → runTool mcp__ fallback → mcpRegistry.clien
 - `.task_outputs/tool-results/` — 超大 tool_result 的落盘全文
 - `.memory/` — 跨会话记忆（记录 + MEMORY.md 索引）
 - `.tasks/` — 持久化任务图
-- `messages.json` — 每轮完整对话快照（覆盖写入，含 user/assistant/tool_use/tool_result）
-- `coding-agent-go.log` — 运行诊断日志（append 写入，Info/Warn/Error，进程退出后保留）
+- `messages.json` — 主代理每轮完整对话快照（覆盖写入，含 user/assistant/tool_use/tool_result）
+- `messages-sub.json` — 子代理完整对话快照（覆盖写入）
+- `.coding-agent-history` — readline 命令历史（↑↓ 翻页、跨进程保留）
+- `coding-agent-go.log` — 运行诊断日志（append 写入，Info/Warn/Error，含调用点与每轮摘要，进程退出后保留）

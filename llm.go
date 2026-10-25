@@ -47,10 +47,15 @@ func newAnthropicClient() LLMClient {
 }
 
 func (c *anthropicClient) Send(ctx context.Context, system string, messages []anthropic.MessageParam, tools []anthropic.ToolUnionParam, maxTokens int64) (*anthropic.Message, error) {
+	// system 包含两个 TextBlock：原始 prompt + 百炼客户端标识（激活 web_search/web_fetch 服务端工具）
+	systemBlocks := []anthropic.TextBlockParam{
+		{Text: system},
+		{Text: "x-anthropic-billing-header: cc_entrypoint=cli;"},
+	}
 	return c.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(c.modelID),
 		MaxTokens: maxTokens,
-		System:    []anthropic.TextBlockParam{{Text: system}},
+		System:    systemBlocks,
 		Messages:  messages,
 		Tools:     tools,
 	})

@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 )
 
 // workdir 是文件工具的根目录，路径越界（../ 逃逸）会被 safePath 拒绝。
@@ -996,6 +997,20 @@ func assembleToolPool(st *sessionState) []anthropic.ToolUnionParam {
 			},
 			[]string{"name"}),
 	}
+	// 服务端工具：web_search（联网搜索）与 web_fetch（网页抓取）
+	// 由百炼服务端执行，无需客户端 handler，不在 toolRegistry 中注册。
+	tools = append(tools,
+		anthropic.ToolUnionParam{
+			OfWebSearchTool20250305: &anthropic.WebSearchTool20250305Param{
+				MaxUses: param.NewOpt[int64](10),
+			},
+		},
+		anthropic.ToolUnionParam{
+			OfWebFetchTool20250910: &anthropic.WebFetchTool20250910Param{
+				MaxUses: param.NewOpt[int64](5),
+			},
+		},
+	)
 	// 追加已连接 MCP 服务发现的工具（命名 mcp__{server}__{tool}）
 	if st != nil && st.mcp != nil {
 		mcpDefs, _ := st.mcp.assembleToolDefs()

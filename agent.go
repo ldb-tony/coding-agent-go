@@ -67,6 +67,23 @@ func agentLoop(ctx context.Context, client LLMClient, messages []anthropic.Messa
 			if block.Type == "tool_use" {
 				toolUses++
 			}
+			// 打印服务端工具调用状态（web_search / web_fetch 由百炼服务端执行）
+			if block.Type == "server_tool_use" {
+				stu := block.AsServerToolUse()
+				var inputDesc string
+				if m, ok := stu.Input.(map[string]any); ok {
+					if q, ok := m["query"].(string); ok {
+						inputDesc = q
+					} else if u, ok := m["url"].(string); ok {
+						inputDesc = u
+					}
+				}
+				if inputDesc != "" {
+					fmt.Printf("[server_tool] %s: %s\n", stu.Name, inputDesc)
+				} else {
+					fmt.Printf("[server_tool] %s\n", stu.Name)
+				}
+			}
 		}
 		appLog.Info("llm response", "turn", turn, "ms", time.Since(sendStart).Milliseconds(),
 			"stop_reason", resp.StopReason, "input_tokens", resp.Usage.InputTokens,

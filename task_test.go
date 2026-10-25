@@ -54,20 +54,26 @@ func newSubState(client LLMClient) *sessionState {
 }
 
 // TestSubToolsExcludesTask 验证子代理工具集不含 task（只允许一层委派），其余基础工具保留。
+// 服务端工具（web_search / web_fetch）不在 toolRegistry 中，但也应保留在子代理工具集中。
 func TestSubToolsExcludesTask(t *testing.T) {
 	tools := subTools(newSessionState())
 	if len(tools) == 0 {
 		t.Fatal("subTools returned no tools")
 	}
 	var names []string
+	var serverToolCount int
 	for _, tp := range tools {
-		if tp.OfTool == nil {
-			t.Fatalf("tool entry with nil OfTool")
+		if tp.OfTool != nil {
+			names = append(names, tp.OfTool.Name)
+		} else {
+			// 服务端工具（web_search / web_fetch）没有 OfTool
+			serverToolCount++
 		}
-		names = append(names, tp.OfTool.Name)
 	}
-	if len(names) != len(allTools())-1 {
-		t.Fatalf("expected %d tools (all minus task), got %d", len(allTools())-1, len(names))
+	// 子代理工具数 = 全部工具数 - 1（去掉 task）
+	expectedTotal := len(allTools()) - 1
+	if len(names)+serverToolCount != expectedTotal {
+		t.Fatalf("expected %d tools (all minus task), got %d (client=%d + server=%d)", expectedTotal, len(names)+serverToolCount, len(names), serverToolCount)
 	}
 	for _, n := range names {
 		if n == taskToolName {
@@ -84,6 +90,10 @@ func TestSubToolsExcludesTask(t *testing.T) {
 		if !found {
 			t.Errorf("subTools missing base tool %q", want)
 		}
+	}
+	// 验证服务端工具也被包含
+	if serverToolCount != 2 {
+		t.Errorf("subTools should have 2 server tools (web_search + web_fetch), got %d", serverToolCount)
 	}
 }
 

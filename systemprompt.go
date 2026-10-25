@@ -94,6 +94,8 @@ func promptUsingTools() string {
    - To find files use glob instead of find or ls.
    - To search file contents use grep instead of running grep or rg through bash.
    - Reserve bash for system commands and terminal operations that genuinely require a shell.
+ - Use web_search to find up-to-date information on the internet. Use web_fetch to read the full content of a specific URL.
+   web_search returns a list of relevant page titles and URLs; web_fetch extracts and summarizes page content.
  - Use todo_write to break multi-step work into ordered items and keep the list current. Mark an item completed as soon as it is done.
  - You can emit multiple tool calls in one response. Independent read-only calls (read_file / glob / grep) within the same response are executed concurrently; write calls (write_file / edit_file / bash / etc.) do not overlap with each other; read-write calls to the same resource are executed in the order they were issued. Results are always returned in the order they were issued. Calls whose arguments depend on earlier results must still be sequential — concurrency does not change dependency semantics.`
 }

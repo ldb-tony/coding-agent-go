@@ -405,14 +405,20 @@ func TestAgentLoopDispatchesFileTool(t *testing.T) {
 }
 
 // TestAllToolsRegistered 防止新增工具时漏注册 schema（allTools 与 toolRegistry 必须一一对应）。
+// 服务端工具（web_search / web_fetch）不在 toolRegistry 中注册，单独验证。
 func TestAllToolsRegistered(t *testing.T) {
 	tools := allTools()
-	want := []string{"bash", "read_file", "write_file", "edit_file", "glob", "grep", "todo_write", "load_skill", "task", "compact",
+	// 客户端工具（在 toolRegistry 中注册）
+	clientTools := []string{"bash", "read_file", "write_file", "edit_file", "glob", "grep", "todo_write", "load_skill", "task", "compact",
 		"create_task", "update_task", "claim_task", "complete_task", "get_task", "list_tasks", "connect_mcp"}
-	if len(tools) != len(want) {
-		t.Fatalf("allTools returned %d tools, want %d", len(tools), len(want))
+	// 服务端工具数量（web_search + web_fetch）
+	const serverToolCount = 2
+	wantTotal := len(clientTools) + serverToolCount
+	if len(tools) != wantTotal {
+		t.Fatalf("allTools returned %d tools, want %d (client=%d + server=%d)", len(tools), wantTotal, len(clientTools), serverToolCount)
 	}
-	for i, name := range want {
+	// 验证客户端工具注册
+	for i, name := range clientTools {
 		if tools[i].OfTool == nil {
 			t.Fatalf("tools[%d] OfTool is nil", i)
 		}
@@ -426,6 +432,14 @@ func TestAllToolsRegistered(t *testing.T) {
 		if strings.HasPrefix(name, "mcp__") {
 			t.Errorf("static tool %q must not use reserved mcp__ prefix", name)
 		}
+	}
+	// 验证服务端工具声明（web_search + web_fetch）
+	serverToolStart := len(clientTools)
+	if tools[serverToolStart].OfWebSearchTool20250305 == nil {
+		t.Errorf("tools[%d] OfWebSearchTool20250305 is nil, want web_search server tool", serverToolStart)
+	}
+	if tools[serverToolStart+1].OfWebFetchTool20250910 == nil {
+		t.Errorf("tools[%d] OfWebFetchTool20250910 is nil, want web_fetch server tool", serverToolStart+1)
 	}
 }
 

@@ -243,6 +243,10 @@ func logModelResponse(turn int, resp *anthropic.Message) {
 			textContent += block.Text
 		case "tool_use":
 			toolCalls = append(toolCalls, fmt.Sprintf("%s(%s)", block.Name, truncateForLog(string(block.Input))))
+		case "server_tool_use":
+			// 服务端工具调用（web_search / web_fetch 由百炼服务端执行）
+			stu := block.AsServerToolUse()
+			toolCalls = append(toolCalls, fmt.Sprintf("server:%s(%v)", stu.Name, truncateForLog(fmt.Sprintf("%v", stu.Input))))
 		}
 	}
 

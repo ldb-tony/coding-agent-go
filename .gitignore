@@ -6,8 +6,8 @@ messages.json
 messages-sub.json
 coding-agent-go.log
 
-# 编译产物
-coding-agent-go
+# 编译产物（仅根目录二进制，避免误伤 cmd/coding-agent-go/ 源码目录）
+/coding-agent-go
 
 # s08 上下文压缩产物（历史归档与落盘的大输出）
 .transcripts/
